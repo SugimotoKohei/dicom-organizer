@@ -127,7 +127,7 @@ SUMMARY_COLUMNS = [
     "ReceiveCoilName",
 ]
 
-DEFAULT_SERIES_DIR_TEMPLATE = "{series_number}_{series_uid_hash}"
+DEFAULT_SERIES_DIR_TEMPLATE = "{series_number}_{protocol_name}"
 DEFAULT_FILE_TEMPLATE = "{instance_number_6}.dcm"
 
 ACTIONS = ("copy", "symlink", "hardlink", "move")
@@ -622,6 +622,7 @@ def file_context(
         "acquisition_date": ds_value(
             ds, "AcquisitionDate", default=ds_value(ds, "StudyDate", default="unknown_date")
         ),
+        "series_uid": series_uid,
         "series_number": series_number(ds),
         "series_description": safe_name(ds_value(ds, "SeriesDescription")),
         "protocol_name": safe_name(ds_value(ds, "ProtocolName")),
@@ -705,6 +706,33 @@ def suffixed_path(path: Path, seen: set[Path]) -> Path:
         index += 1
 
 
+def resolve_series_dir(
+    base_dir: Path,
+    series_key: tuple[str, str],
+    assigned_dirs: dict[tuple[str, str], Path],
+    used_dirs: set[Path],
+) -> Path:
+    if series_key in assigned_dirs:
+        return assigned_dirs[series_key]
+
+    candidate = unique_series_dir(base_dir, used_dirs)
+    assigned_dirs[series_key] = candidate
+    used_dirs.add(candidate)
+    return candidate
+
+
+def unique_series_dir(base_dir: Path, used_dirs: set[Path]) -> Path:
+    if base_dir not in used_dirs:
+        return base_dir
+
+    index = 2
+    while True:
+        candidate = base_dir.with_name(f"{base_dir.name}_{index:02d}")
+        if candidate not in used_dirs:
+            return candidate
+        index += 1
+
+
 def materialize(source: Path, destination: Path, action: str, overwrite: bool) -> None:
     if overwrite and destination.exists():
         destination.unlink()
@@ -726,6 +754,8 @@ def build_items(args: argparse.Namespace | OrganizeOptions) -> tuple[list[Organi
     output_root = options.output_root
     stats: Counter[str] = Counter()
     seen_destinations: set[Path] = set()
+    assigned_series_dirs: dict[tuple[str, str], Path] = {}
+    used_series_dirs: set[Path] = set()
     items: list[OrganizedItem] = []
     dicom_tag_specs = parse_dicom_tag_specs(options.dicom_tags)
 
@@ -748,9 +778,17 @@ def build_items(args: argparse.Namespace | OrganizeOptions) -> tuple[list[Organi
             dicom_tag_specs,
         )
         acquisition_date = context["acquisition_date"]
-        series_dir = safe_name(format_template(options.series_dir_template, context, "series-dir"))
+        series_dir_name = safe_name(
+            format_template(options.series_dir_template, context, "series-dir")
+        )
+        series_dir = resolve_series_dir(
+            output_root / acquisition_date / series_dir_name,
+            series_key=(acquisition_date, context["series_uid"]),
+            assigned_dirs=assigned_series_dirs,
+            used_dirs=used_series_dirs,
+        )
         filename = safe_name(format_template(options.file_template, context, "file"))
-        destination = output_root / acquisition_date / series_dir / filename
+        destination = series_dir / filename
         resolved = resolve_collision(destination, seen_destinations, options.if_exists)
         if resolved is None:
             stats["skipped_existing"] += 1

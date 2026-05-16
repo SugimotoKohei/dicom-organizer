@@ -24,6 +24,7 @@ def write_dicom(
     acquisition_date: str = "20260515",
     echo_time: float = 10.0,
     phase_encoding_direction: str = "ROW",
+    protocol_name: str | None = None,
 ) -> None:
     file_meta = FileMetaDataset()
     file_meta.MediaStorageSOPClassUID = MRImageStorage
@@ -44,7 +45,7 @@ def write_dicom(
     ds.SeriesNumber = series_number
     ds.InstanceNumber = instance_number
     ds.SeriesDescription = f"Series {series_number}"
-    ds.ProtocolName = f"Protocol {series_number}"
+    ds.ProtocolName = protocol_name or f"Protocol {series_number}"
     ds.PatientName = patient_name
     ds.PatientID = "PID001"
     ds.RepetitionTime = 1000
@@ -71,7 +72,7 @@ def args_for(input_root: Path, output_root: Path, **overrides: object) -> argpar
         "include_hidden": False,
         "include_organized": False,
         "limit": 0,
-        "series_dir_template": "{series_number}_{series_uid_hash}",
+        "series_dir_template": "{series_number}_{protocol_name}",
         "file_template": "{instance_number_6}.dcm",
         "patient_mode": "keep",
         "dicom_tags": (),
@@ -101,6 +102,7 @@ def test_dry_run_builds_series_without_writing(tmp_path: Path) -> None:
     assert stats["skipped_non_dicom"] == 0
     assert not output_root.exists()
     assert items[0].destination.name == "000001.dcm"
+    assert items[0].destination.parent.name == "000007_Protocol-7"
 
 
 def test_run_dry_run_does_not_write_output(tmp_path: Path) -> None:
@@ -173,6 +175,54 @@ def test_run_writes_files_and_metadata(tmp_path: Path) -> None:
     assert metadata_row["PhaseEncodingDirection"] == "ROW"
     assert metadata_row["InPlanePhaseEncodingDirection"] == "ROW"
     assert all("(" not in column and ")" not in column for column in metadata_row)
+
+
+def test_default_series_directory_uses_protocol_name(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "one.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=3,
+        instance_number=1,
+        protocol_name="T2 TSE axial (fast)",
+    )
+
+    result = run(args_for(input_root, output_root))
+
+    assert result.items[0].destination.parent.name == "000003_T2-TSE-axial-fast"
+    assert result.items[0].row["OrganizedFileName"].startswith(
+        "20260515/000003_T2-TSE-axial-fast/"
+    )
+
+
+def test_duplicate_protocol_series_get_distinct_directories(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "a.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=4,
+        instance_number=1,
+        protocol_name="Repeated Protocol",
+    )
+    write_dicom(
+        input_root / "b.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=4,
+        instance_number=1,
+        protocol_name="Repeated Protocol",
+    )
+
+    result = run(args_for(input_root, output_root))
+    parents = [item.destination.parent.name for item in result.items]
+
+    assert parents == ["000004_Repeated-Protocol", "000004_Repeated-Protocol_02"]
 
 
 def test_run_rejects_missing_input_directory(tmp_path: Path) -> None:

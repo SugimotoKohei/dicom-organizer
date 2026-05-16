@@ -70,13 +70,16 @@ GUI では入力フォルダと出力フォルダを選び、まず `Dry Run` �
 既定では `<input>/organized/` に以下を出力します。
 
 ```text
-organized/<AcquisitionDate>/<SeriesNumber>_<SeriesUID hash>/
+organized/<AcquisitionDate>/<SeriesNumber>_<ProtocolName>/
 ├─ 000001.dcm
 ├─ ...
 organized/<AcquisitionDate>/mri_parameters.csv
 organized/<AcquisitionDate>/series_summary.csv
 organized/organize_summary.json
 ```
+
+既定のseriesディレクトリ名は `SeriesNumber_ProtocolName` です。
+同じ日付内で同名になる別seriesがある場合は、混在を避けるため `_02` のような連番を付けます。
 
 ## 患者情報
 

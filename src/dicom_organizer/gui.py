@@ -13,6 +13,7 @@ from dicom_organizer.core import (
     DEFAULT_FILE_TEMPLATE,
     DEFAULT_SERIES_DIR_TEMPLATE,
     OrganizedItem,
+    PROFILE_NAMES,
     build_series_summary,
     run,
 )
@@ -85,12 +86,10 @@ else:
 PREVIEW_COLUMNS = [
     "AcquisitionDate",
     "SeriesNumber",
+    "Modality",
     "SeriesDescription",
     "ProtocolName",
     "FileCount",
-    "EchoCount",
-    "EchoTimes_ms",
-    "CoilElementCount",
     "Rows",
     "Columns",
     "FOV_HxW_mm",
@@ -117,6 +116,7 @@ class Worker(QObject):
                     "stats": result.stats,
                     "output_root": result.output_root,
                     "dry_run": result.dry_run,
+                    "profile": result.profile,
                     "summary": result.summary,
                 }
             )
@@ -139,6 +139,8 @@ class MainWindow(QMainWindow):
         self.action_combo.addItems(["copy", "symlink", "hardlink", "move"])
         self.exists_combo = QComboBox()
         self.exists_combo.addItems(["error", "skip", "overwrite", "rename"])
+        self.profile_combo = QComboBox()
+        self.profile_combo.addItems(list(PROFILE_NAMES))
         self.patient_combo = QComboBox()
         self.patient_combo.addItems(["keep", "hash", "drop"])
         self.force_read_check = QCheckBox("force-read")
@@ -190,6 +192,7 @@ class MainWindow(QMainWindow):
         options_layout = QFormLayout(options_group)
         options_layout.addRow("Action", self.action_combo)
         options_layout.addRow("If exists", self.exists_combo)
+        options_layout.addRow("Profile", self.profile_combo)
         options_layout.addRow("Patient mode", self.patient_combo)
         options_layout.addRow("Series dir template", self.series_template_edit)
         options_layout.addRow("File template", self.file_template_edit)
@@ -250,6 +253,7 @@ class MainWindow(QMainWindow):
             action=self.action_combo.currentText(),
             confirm_move=self.action_combo.currentText() == "move",
             if_exists=self.exists_combo.currentText(),
+            profile=self.profile_combo.currentText(),
             dry_run=dry_run,
             force_read=self.force_read_check.isChecked(),
             include_hidden=self.include_hidden_check.isChecked(),
@@ -307,10 +311,11 @@ class MainWindow(QMainWindow):
         items: list[OrganizedItem] = payload["items"]
         stats: Counter[str] = payload["stats"]
         output_root: Path = payload["output_root"]
+        profile: str = payload["profile"]
         summary: dict[str, Any] = payload["summary"]
         self.last_output_root = output_root
         self.open_output_button.setEnabled(output_root.exists())
-        self._fill_table(items)
+        self._fill_table(items, profile)
         self.log.appendPlainText(
             "Completed: "
             f"organized_files={summary['organized_files']}, "
@@ -333,8 +338,8 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, 0 if busy else 1)
         self.progress.setValue(0)
 
-    def _fill_table(self, items: list[OrganizedItem]) -> None:
-        rows = build_series_summary([item.row for item in items])
+    def _fill_table(self, items: list[OrganizedItem], profile: str) -> None:
+        rows = build_series_summary([item.row for item in items], profile)
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):

@@ -12,9 +12,12 @@ occur, but they should be documented here.
 - Provide the `dicom-organizer` CLI.
 - Add optional PySide6 GUI support through the `gui` extra.
 - Organize DICOM files by acquisition date and series.
-- Use protocol names in default series directory names.
-- Write `mri_parameters.csv`, `series_summary.csv`, and `organize_summary.json`.
+- Use normalized series labels in default series directory names, with vendor-aware
+  handling for Philips, GE, Canon, and Toshiba-family metadata.
+- Write `dicom_parameters.csv`, `series_summary.csv`, and `organize_summary.json`.
+- Support metadata profiles with `--profile auto/generic/mr/ct/us/xa/pt`.
 - Support `--patient-mode keep/hash/drop`.
 - Support repeatable `--dicom-tag` custom metadata columns.
-- Add default MR acquisition metadata columns for common sequence parameters.
+- Add modality-aware acquisition metadata columns for common MR, CT, US, XA, and
+  PT parameters.
 - Add publication metadata, safety documentation, and CI/release workflows.

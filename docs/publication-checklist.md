@@ -68,9 +68,13 @@ uv run dicom-organizer-gui --help
 uv run python examples/synthetic_quickstart.py
 ```
 
+Confirm the generated synthetic output writes `dicom_parameters.csv`,
+`series_summary.csv`, and `organize_summary.json`.
+
 After publishing:
 
 ```bash
 uv tool install dicom-organizer --force
 dicom-organizer --help
+dicom-organizer --help | grep -- --profile
 ```

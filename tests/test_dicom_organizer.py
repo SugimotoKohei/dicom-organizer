@@ -7,10 +7,24 @@ import sys
 from pathlib import Path
 
 import pytest
-from pydicom.dataset import FileDataset, FileMetaDataset
-from pydicom.uid import ExplicitVRLittleEndian, MRImageStorage, generate_uid
+from pydicom.dataset import Dataset, FileDataset, FileMetaDataset
+from pydicom.sequence import Sequence
+from pydicom.uid import (
+    CTImageStorage,
+    ExplicitVRLittleEndian,
+    MRImageStorage,
+    PositronEmissionTomographyImageStorage,
+    UltrasoundImageStorage,
+    XRayAngiographicImageStorage,
+    generate_uid,
+)
 
-from dicom_organizer.core import build_items, run
+from dicom_organizer.core import (
+    DEFAULT_FILE_TEMPLATE,
+    DEFAULT_SERIES_DIR_TEMPLATE,
+    build_items,
+    run,
+)
 
 
 def write_dicom(
@@ -25,46 +39,103 @@ def write_dicom(
     echo_time: float = 10.0,
     phase_encoding_direction: str = "ROW",
     protocol_name: str | None = None,
+    series_description: str | None = None,
+    manufacturer: str = "UnitTest",
+    image_type: tuple[str, ...] | list[str] | None = None,
+    sop_class_uid: str | None = None,
+    echo_numbers: int | None = 1,
+    acquisition_number: int | None = None,
+    modality: str = "MR",
+    sequence_name: str | None = "tse",
+    philips_private_pulse_sequence_name: str | None = None,
 ) -> None:
+    if sop_class_uid is None:
+        sop_class_uid = {
+            "MR": str(MRImageStorage),
+            "CT": str(CTImageStorage),
+            "US": str(UltrasoundImageStorage),
+            "XA": str(XRayAngiographicImageStorage),
+            "PT": str(PositronEmissionTomographyImageStorage),
+        }.get(modality, str(MRImageStorage))
     file_meta = FileMetaDataset()
-    file_meta.MediaStorageSOPClassUID = MRImageStorage
+    file_meta.MediaStorageSOPClassUID = sop_class_uid
     file_meta.MediaStorageSOPInstanceUID = sop_uid
     file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
     file_meta.ImplementationClassUID = generate_uid()
 
     ds = FileDataset(str(path), {}, file_meta=file_meta, preamble=b"\0" * 128)
-    ds.SOPClassUID = MRImageStorage
+    ds.SOPClassUID = sop_class_uid
     ds.SOPInstanceUID = sop_uid
     ds.SeriesInstanceUID = series_uid
     ds.StudyInstanceUID = generate_uid()
     ds.FrameOfReferenceUID = generate_uid()
-    ds.Modality = "MR"
+    ds.Modality = modality
     ds.AcquisitionDate = acquisition_date
     ds.StudyDate = acquisition_date
     ds.SeriesDate = acquisition_date
     ds.SeriesNumber = series_number
     ds.InstanceNumber = instance_number
-    ds.SeriesDescription = f"Series {series_number}"
+    if acquisition_number is not None:
+        ds.AcquisitionNumber = acquisition_number
+    ds.SeriesDescription = series_description or f"Series {series_number}"
     ds.ProtocolName = protocol_name or f"Protocol {series_number}"
     ds.PatientName = patient_name
     ds.PatientID = "PID001"
-    ds.RepetitionTime = 1000
-    ds.EchoTime = echo_time
-    ds.InPlanePhaseEncodingDirection = phase_encoding_direction
-    ds.SequenceName = "tse"
-    ds.InversionTime = 120
-    ds.EchoNumbers = 1
-    ds.AcquisitionMatrix = [0, 16, 16, 0]
-    ds.NumberOfPhaseEncodingSteps = 12
-    ds.PercentSampling = 80
-    ds.PercentPhaseFieldOfView = 75
-    ds.SAR = 0.42
     ds.Rows = 16
     ds.Columns = 16
     ds.PixelSpacing = [1.5, 1.5]
-    ds.Manufacturer = "UnitTest"
+    ds.Manufacturer = manufacturer
     ds.ManufacturerModelName = "Synthetic"
-    ds.ImageType = ["ORIGINAL", "PRIMARY"]
+    ds.SliceThickness = 4
+    ds.SpacingBetweenSlices = 4.5
+    ds.SliceLocation = 12.0
+    if image_type is None:
+        ds.ImageType = ["ORIGINAL", "PRIMARY"]
+    elif image_type:
+        ds.ImageType = list(image_type)
+    if modality == "MR":
+        ds.RepetitionTime = 1000
+        ds.EchoTime = echo_time
+        ds.InPlanePhaseEncodingDirection = phase_encoding_direction
+        if sequence_name is not None:
+            ds.SequenceName = sequence_name
+        ds.InversionTime = 120
+        if echo_numbers is not None:
+            ds.EchoNumbers = echo_numbers
+        ds.AcquisitionMatrix = [0, 16, 16, 0]
+        ds.NumberOfPhaseEncodingSteps = 12
+        ds.PercentSampling = 80
+        ds.PercentPhaseFieldOfView = 75
+        ds.SAR = 0.42
+    if modality == "CT":
+        ds.KVP = 120
+        ds.XRayTubeCurrent = 220
+        ds.ExposureTime = 800
+        ds.ConvolutionKernel = "B30f"
+        ds.ReconstructionDiameter = 240
+    if modality == "US":
+        ds.TransducerData = "L12-5"
+        ds.TransducerType = "LINEAR"
+        ds.MechanicalIndex = 0.8
+        ds.UltrasoundColorDataPresent = 0
+    if modality == "XA":
+        ds.KVP = 70
+        ds.XRayTubeCurrent = 125
+        ds.ExposureTime = 12
+        ds.FrameTime = 33.3
+        ds.DistanceSourceToDetector = 950
+        ds.DistanceSourceToPatient = 700
+    if modality == "PT":
+        item = Dataset()
+        item.Radiopharmaceutical = "FDG"
+        item.RadionuclideTotalDose = 123456789
+        item.RadionuclideHalfLife = 6586.2
+        ds.RadiopharmaceuticalInformationSequence = Sequence([item])
+        ds.DecayCorrection = "START"
+    if philips_private_pulse_sequence_name is not None:
+        item = Dataset()
+        item.PulseSequenceName = philips_private_pulse_sequence_name
+        ds.add_new((0x2005, 0x140F), "SQ", Sequence([item]))
     ds.save_as(path, enforce_file_format=True)
 
 
@@ -80,8 +151,9 @@ def args_for(input_root: Path, output_root: Path, **overrides: object) -> argpar
         "include_hidden": False,
         "include_organized": False,
         "limit": 0,
-        "series_dir_template": "{series_number}_{protocol_name}",
-        "file_template": "{instance_number_6}.dcm",
+        "series_dir_template": DEFAULT_SERIES_DIR_TEMPLATE,
+        "file_template": DEFAULT_FILE_TEMPLATE,
+        "profile": "auto",
         "patient_mode": "keep",
         "dicom_tags": (),
         "verbose": False,
@@ -158,6 +230,33 @@ def test_default_scan_prunes_existing_organized_directory(tmp_path: Path) -> Non
     assert result.summary["organized_files"] == 1
 
 
+def test_default_scan_prunes_organized_backup_directory(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = input_root / "organized"
+    backup_root = input_root / "organized.before-rerun"
+    input_root.mkdir()
+    backup_root.mkdir()
+    write_dicom(
+        input_root / "one.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+    )
+    write_dicom(
+        backup_root / "old.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=99,
+        instance_number=1,
+    )
+
+    result = run(args_for(input_root, output_root, dry_run=True))
+
+    assert result.summary["candidate_files"] == 1
+    assert result.summary["organized_files"] == 1
+
+
 def test_run_writes_files_and_metadata(tmp_path: Path) -> None:
     input_root = tmp_path / "input"
     output_root = tmp_path / "organized"
@@ -187,7 +286,7 @@ def test_run_writes_files_and_metadata(tmp_path: Path) -> None:
     assert result.summary["series_count"] == 2
     assert (output_root / "organize_summary.json").exists()
     date_dir = output_root / "20260515"
-    assert (date_dir / "mri_parameters.csv").exists()
+    assert (date_dir / "dicom_parameters.csv").exists()
     assert (date_dir / "series_summary.csv").exists()
 
     with (date_dir / "series_summary.csv").open(encoding="utf-8-sig", newline="") as handle:
@@ -209,7 +308,7 @@ def test_run_writes_files_and_metadata(tmp_path: Path) -> None:
     assert "InPlanePhaseEncodingDirection" not in rows[0]
     assert all("(" not in column and ")" not in column for column in rows[0])
 
-    with (date_dir / "mri_parameters.csv").open(encoding="utf-8-sig", newline="") as handle:
+    with (date_dir / "dicom_parameters.csv").open(encoding="utf-8-sig", newline="") as handle:
         metadata_row = next(csv.DictReader(handle))
     assert metadata_row["TE_ms"] == "10.0"
     assert metadata_row["PixelBandwidth_Hz_per_px"] == "N/A"
@@ -224,6 +323,262 @@ def test_run_writes_files_and_metadata(tmp_path: Path) -> None:
     assert "PhaseEncodingDirection" not in metadata_row
     assert "InPlanePhaseEncodingDirection" not in metadata_row
     assert all("(" not in column and ")" not in column for column in metadata_row)
+
+
+def test_metadata_tables_exclude_non_image_objects(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    series_uid = generate_uid()
+    write_dicom(
+        input_root / "image.dcm",
+        series_uid=series_uid,
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+    )
+    write_dicom(
+        input_root / "pr.dcm",
+        series_uid=series_uid,
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=2,
+        sop_class_uid="1.2.840.10008.5.1.4.1.1.11.1",
+        modality="PR",
+        image_type=(),
+        echo_numbers=None,
+        sequence_name=None,
+    )
+
+    run(args_for(input_root, output_root))
+
+    with (output_root / "20260515" / "dicom_parameters.csv").open(
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        metadata_rows = list(csv.DictReader(handle))
+    assert len(metadata_rows) == 1
+    assert metadata_rows[0]["SOPClassUID"] == str(MRImageStorage)
+
+    with (output_root / "20260515" / "series_summary.csv").open(
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        summary_rows = list(csv.DictReader(handle))
+    assert len(summary_rows) == 1
+    assert summary_rows[0]["FileCount"] == "1"
+
+
+def test_philips_sequence_name_falls_back_to_private_sequence(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "one.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        manufacturer="Philips",
+        sequence_name=None,
+        philips_private_pulse_sequence_name="TSE",
+    )
+
+    run(args_for(input_root, output_root))
+
+    with (output_root / "20260515" / "dicom_parameters.csv").open(
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        metadata_row = next(csv.DictReader(handle))
+    assert metadata_row["SequenceName"] == "TSE"
+
+
+def test_auto_profile_writes_mixed_modality_union_csv(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "mr.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        modality="MR",
+    )
+    write_dicom(
+        input_root / "ct.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=2,
+        instance_number=1,
+        modality="CT",
+    )
+
+    run(args_for(input_root, output_root, profile="auto"))
+
+    with (output_root / "20260515" / "dicom_parameters.csv").open(
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+        fieldnames = reader.fieldnames or []
+    assert {row["Modality"] for row in rows} == {"CT", "MR"}
+    assert "TE_ms" in fieldnames
+    assert "KVP_kV" in fieldnames
+    mr_row = next(row for row in rows if row["Modality"] == "MR")
+    ct_row = next(row for row in rows if row["Modality"] == "CT")
+    assert mr_row["TE_ms"] == "10.0"
+    assert ct_row["KVP_kV"] == "120.0"
+    assert ct_row["TE_ms"] == "N/A"
+
+    with (output_root / "20260515" / "series_summary.csv").open(
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        reader = csv.DictReader(handle)
+        summary_rows = list(reader)
+        summary_fieldnames = reader.fieldnames or []
+    assert {row["Modality"] for row in summary_rows} == {"CT", "MR"}
+    assert "KVP_kV" in summary_fieldnames
+    assert "EchoCount" in summary_fieldnames
+
+
+def test_generic_profile_uses_common_columns_only(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "mr.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        modality="MR",
+    )
+    write_dicom(
+        input_root / "ct.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=2,
+        instance_number=1,
+        modality="CT",
+    )
+
+    run(args_for(input_root, output_root, profile="generic"))
+
+    with (output_root / "20260515" / "dicom_parameters.csv").open(
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+        fieldnames = reader.fieldnames or []
+    assert len(rows) == 2
+    assert "TE_ms" not in fieldnames
+    assert "KVP_kV" not in fieldnames
+    assert "Modality" in fieldnames
+
+    with (output_root / "20260515" / "series_summary.csv").open(
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        reader = csv.DictReader(handle)
+        summary_rows = list(reader)
+        summary_fieldnames = reader.fieldnames or []
+    assert len(summary_rows) == 2
+    assert "EchoCount" not in summary_fieldnames
+    assert "KVP_kV" not in summary_fieldnames
+
+
+def test_ct_profile_filters_to_ct_image_rows(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "mr.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        modality="MR",
+    )
+    write_dicom(
+        input_root / "ct.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=2,
+        instance_number=1,
+        modality="CT",
+    )
+    write_dicom(
+        input_root / "pr.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=3,
+        instance_number=1,
+        sop_class_uid="1.2.840.10008.5.1.4.1.1.11.1",
+        modality="PR",
+    )
+
+    run(args_for(input_root, output_root, profile="ct"))
+
+    with (output_root / "20260515" / "dicom_parameters.csv").open(
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1
+    assert rows[0]["Modality"] == "CT"
+    assert rows[0]["SOPClassUID"] == str(CTImageStorage)
+
+    with (output_root / "20260515" / "series_summary.csv").open(
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        summary_rows = list(csv.DictReader(handle))
+    assert len(summary_rows) == 1
+    assert summary_rows[0]["Modality"] == "CT"
+
+
+@pytest.mark.parametrize(
+    ("profile", "modality", "expected_column", "expected_value"),
+    [
+        ("ct", "CT", "KVP_kV", "120.0"),
+        ("us", "US", "TransducerData", "L12-5"),
+        ("xa", "XA", "FrameTime_ms", "33.3"),
+        ("pt", "PT", "Radiopharmaceutical", "FDG"),
+    ],
+)
+def test_non_mr_profiles_write_supported_metadata(
+    tmp_path: Path,
+    profile: str,
+    modality: str,
+    expected_column: str,
+    expected_value: str,
+) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "one.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        modality=modality,
+    )
+
+    run(args_for(input_root, output_root, profile=profile))
+
+    with (output_root / "20260515" / "dicom_parameters.csv").open(
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        row = next(csv.DictReader(handle))
+    assert row["Modality"] == modality
+    assert row[expected_column] == expected_value
 
 
 def test_default_series_directory_uses_protocol_name(tmp_path: Path) -> None:
@@ -245,6 +600,215 @@ def test_default_series_directory_uses_protocol_name(tmp_path: Path) -> None:
     assert result.items[0].row["OrganizedFileName"].startswith(
         "20260515/000003_T2-TSE-axial-fast/"
     )
+
+
+def test_default_series_directory_prefers_series_description_for_philips(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "one.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=8,
+        instance_number=1,
+        manufacturer="Philips",
+        series_description="B1 fast named by operator",
+        protocol_name="WIP B1 fast named by operator",
+    )
+
+    result = run(args_for(input_root, output_root))
+
+    assert result.items[0].destination.parent.name == "000008_B1-fast-named-by-operator"
+    assert result.items[0].row["SeriesDescription"] == "B1 fast named by operator"
+    assert result.items[0].row["ProtocolName"] == "WIP B1 fast named by operator"
+
+
+def test_default_series_directory_prefers_series_description_for_ge(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "one.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=8,
+        instance_number=1,
+        manufacturer="GE MEDICAL SYSTEMS",
+        series_description="T2 F-sat Cor FRFSE",
+        protocol_name="004 Wrist (GP-Flex)",
+    )
+
+    result = run(args_for(input_root, output_root))
+
+    assert result.items[0].destination.parent.name == "000008_T2-F-sat-Cor-FRFSE"
+    assert result.items[0].row["SeriesDescription"] == "T2 F-sat Cor FRFSE"
+    assert result.items[0].row["ProtocolName"] == "004 Wrist (GP-Flex)"
+
+
+def test_philips_numeric_series_label_inherits_anchor_name(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "anchor.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=4,
+        instance_number=1,
+        manufacturer="Philips",
+        acquisition_number=4,
+        series_description="T2W Echose 30*32.",
+        protocol_name="WIP T2W Echose 30*32.",
+        image_type=("ORIGINAL", "PRIMARY", "M_SE", "M", "SE"),
+    )
+    write_dicom(
+        input_root / "numeric.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=6,
+        instance_number=1,
+        manufacturer="Philips",
+        acquisition_number=4,
+        series_description="2",
+        protocol_name="WIP 2",
+        image_type=("ORIGINAL", "PRIMARY", "M_SE", "M", "SE"),
+    )
+
+    result = run(args_for(input_root, output_root))
+
+    parents = sorted(item.destination.parent.name for item in result.items)
+    assert parents == ["000004_T2W-Echose-30-32", "000006_T2W-Echose-30-32_2"]
+
+
+def test_philips_series_splits_reconstructions_by_image_type(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    series_uid = generate_uid()
+    write_dicom(
+        input_root / "m1.dcm",
+        series_uid=series_uid,
+        sop_uid=generate_uid(),
+        series_number=10,
+        instance_number=1,
+        manufacturer="Philips",
+        series_description="B1 fast named by operator",
+        protocol_name="WIP B1 fast named by operator",
+        image_type=("ORIGINAL", "PRIMARY", "M_B1", "M", "B1"),
+        echo_time=0,
+    )
+    write_dicom(
+        input_root / "m2.dcm",
+        series_uid=series_uid,
+        sop_uid=generate_uid(),
+        series_number=10,
+        instance_number=2,
+        manufacturer="Philips",
+        series_description="B1 fast named by operator",
+        protocol_name="WIP B1 fast named by operator",
+        image_type=("ORIGINAL", "PRIMARY", "M_B1", "M", "B1"),
+        echo_time=0,
+    )
+    write_dicom(
+        input_root / "phase.dcm",
+        series_uid=series_uid,
+        sop_uid=generate_uid(),
+        series_number=10,
+        instance_number=3,
+        manufacturer="Philips",
+        series_description="B1 fast named by operator",
+        protocol_name="WIP B1 fast named by operator",
+        image_type=("ORIGINAL", "PRIMARY", "PHASE MAP", "P", "B1"),
+        echo_time=0,
+    )
+    write_dicom(
+        input_root / "xx.dcm",
+        series_uid=series_uid,
+        sop_uid=generate_uid(),
+        series_number=10,
+        instance_number=4,
+        manufacturer="Philips",
+        series_description="B1 fast named by operator",
+        protocol_name="WIP B1 fast named by operator",
+        image_type=(),
+        sop_class_uid="1.3.46.670589.11.0.0.12.2",
+        echo_numbers=None,
+    )
+
+    result = run(args_for(input_root, output_root))
+
+    parents = [item.destination.parent.name for item in result.items]
+    assert parents.count("000010_B1-fast-named-by-operator_M_B1") == 3
+    assert parents.count("000010_B1-fast-named-by-operator_PHASE-MAP-B1") == 1
+    assert result.summary["series_count"] == 2
+
+    with (output_root / "20260515" / "series_summary.csv").open(
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 2
+    assert sorted(row["FileCount"] for row in rows) == ["1", "2"]
+
+
+def test_philips_non_mr_series_does_not_split_reconstructions(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    series_uid = generate_uid()
+    write_dicom(
+        input_root / "ct_axial.dcm",
+        series_uid=series_uid,
+        sop_uid=generate_uid(),
+        series_number=11,
+        instance_number=1,
+        manufacturer="Philips",
+        modality="CT",
+        image_type=("ORIGINAL", "PRIMARY", "AXIAL"),
+    )
+    write_dicom(
+        input_root / "ct_derived.dcm",
+        series_uid=series_uid,
+        sop_uid=generate_uid(),
+        series_number=11,
+        instance_number=2,
+        manufacturer="Philips",
+        modality="CT",
+        image_type=("DERIVED", "PRIMARY", "AXIAL"),
+    )
+
+    result = run(args_for(input_root, output_root, profile="auto"))
+
+    parents = [item.destination.parent.name for item in result.items]
+    assert parents == ["000011_Series-11", "000011_Series-11"]
+    assert result.summary["series_count"] == 1
+
+
+def test_protocol_name_template_key_still_uses_raw_protocol_name(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "one.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=9,
+        instance_number=1,
+        manufacturer="Philips",
+        series_description="Chosen name",
+        protocol_name="WIP Chosen name",
+    )
+
+    result = run(
+        args_for(
+            input_root,
+            output_root,
+            series_dir_template="{series_number}_{protocol_name}",
+        )
+    )
+
+    assert result.items[0].destination.parent.name == "000009_WIP-Chosen-name"
 
 
 def test_duplicate_protocol_series_get_distinct_directories(tmp_path: Path) -> None:
@@ -300,7 +864,7 @@ def test_patient_mode_keep_hash_and_drop(tmp_path: Path) -> None:
 
     keep_output = tmp_path / "keep"
     run(args_for(input_root, keep_output, patient_mode="keep"))
-    with (keep_output / "20260515" / "mri_parameters.csv").open(
+    with (keep_output / "20260515" / "dicom_parameters.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:
@@ -312,7 +876,7 @@ def test_patient_mode_keep_hash_and_drop(tmp_path: Path) -> None:
 
     hash_output = tmp_path / "hash"
     run(args_for(input_root, hash_output, patient_mode="hash"))
-    with (hash_output / "20260515" / "mri_parameters.csv").open(
+    with (hash_output / "20260515" / "dicom_parameters.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:
@@ -324,7 +888,7 @@ def test_patient_mode_keep_hash_and_drop(tmp_path: Path) -> None:
 
     drop_output = tmp_path / "drop"
     run(args_for(input_root, drop_output, patient_mode="drop"))
-    with (drop_output / "20260515" / "mri_parameters.csv").open(
+    with (drop_output / "20260515" / "dicom_parameters.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:
@@ -361,7 +925,7 @@ def test_custom_dicom_tags_are_written_to_metadata_csv(tmp_path: Path) -> None:
         )
     )
 
-    with (output_root / "20260515" / "mri_parameters.csv").open(
+    with (output_root / "20260515" / "dicom_parameters.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:

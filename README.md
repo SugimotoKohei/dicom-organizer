@@ -38,6 +38,18 @@ uv run organize-dicoms --input /path/to/dicom-root --force-read --if-exists skip
 
 通常はコピーで整理します。元ファイルを移動する場合は、誤操作防止のため `--action move --confirm-move` が必要です。
 
+任意のDICOMタグを `mri_parameters.csv` に追加したい場合は、`--dicom-tag` または `--tag` を複数回指定できます。
+
+```bash
+organize-dicoms --input /path/to/dicom-root \
+  --dicom-tag EchoTime \
+  --dicom-tag 0018,0080 \
+  --dicom-tag CustomPhase=(0018,1312)
+```
+
+タグは DICOM keyword、`0018,0080`、`(0018,0080)`、`0x00180080` の形式を受け付けます。
+列名を指定しない場合は `DICOM_EchoTime` のような列名で出力します。
+
 ## GUI
 
 GUI を使う場合だけ `gui` extra を入れてください。

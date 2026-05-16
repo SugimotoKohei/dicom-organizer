@@ -32,7 +32,9 @@ from pathlib import Path
 from typing import Any
 
 import pydicom
+from pydicom.datadict import keyword_for_tag, tag_for_keyword
 from pydicom.multival import MultiValue
+from pydicom.tag import Tag
 
 
 BASE_METADATA_COLUMNS = [
@@ -155,7 +157,14 @@ class OrganizeOptions:
     series_dir_template: str = DEFAULT_SERIES_DIR_TEMPLATE
     file_template: str = DEFAULT_FILE_TEMPLATE
     patient_mode: str = "keep"
+    dicom_tags: tuple[str, ...] = ()
     verbose: bool = False
+
+
+@dataclass(frozen=True)
+class DicomTagSpec:
+    column: str
+    tag: Tag
 
 
 @dataclass(frozen=True)
@@ -253,6 +262,18 @@ def parse_args() -> argparse.Namespace:
         help="How to write PatientName in metadata CSV. Default keeps the old behavior.",
     )
     parser.add_argument(
+        "--dicom-tag",
+        "--tag",
+        action="append",
+        default=[],
+        metavar="TAG",
+        help=(
+            "Also write this DICOM tag to mri_parameters.csv. Repeatable. "
+            "Accepts keywords such as EchoTime, numeric tags such as 0018,0081 "
+            "or 0x00180081, and optional ColumnName=TAG."
+        ),
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Print skipped files and per-series output while running.",
@@ -295,6 +316,7 @@ def normalize_options(
                 getattr(args, "file_template", DEFAULT_FILE_TEMPLATE) or DEFAULT_FILE_TEMPLATE
             ),
             patient_mode=str(getattr(args, "patient_mode", "keep")),
+            dicom_tags=tuple(str(tag) for tag in getattr(args, "dicom_tags", ()) or ()),
             verbose=bool(getattr(args, "verbose", False)),
         )
 
@@ -320,6 +342,77 @@ def validate_options(options: OrganizeOptions) -> None:
         )
     if options.action == "move" and not options.confirm_move:
         raise ValueError("--action move requires --confirm-move")
+    parse_dicom_tag_specs(options.dicom_tags)
+
+
+def parse_dicom_tag_specs(values: tuple[str, ...]) -> list[DicomTagSpec]:
+    specs: list[DicomTagSpec] = []
+    seen_columns: set[str] = set(METADATA_COLUMNS)
+    for value in values:
+        column, tag = parse_dicom_tag_spec(value)
+        column = unique_column_name(column, seen_columns)
+        seen_columns.add(column)
+        specs.append(DicomTagSpec(column=column, tag=tag))
+    return specs
+
+
+def parse_dicom_tag_spec(value: str) -> tuple[str, Tag]:
+    raw = value.strip()
+    if not raw:
+        raise ValueError("--dicom-tag must not be empty")
+
+    column_override = ""
+    tag_text = raw
+    if "=" in raw:
+        column_override, tag_text = (part.strip() for part in raw.split("=", 1))
+        if not column_override:
+            raise ValueError(f"Column name is empty in --dicom-tag: {value}")
+        if not tag_text:
+            raise ValueError(f"Tag is empty in --dicom-tag: {value}")
+
+    tag = parse_dicom_tag(tag_text)
+    keyword = keyword_for_tag(tag) or tag_text
+    column = safe_column_name(column_override or f"DICOM_{keyword}")
+    if not column:
+        raise ValueError(f"Column name could not be derived from --dicom-tag: {value}")
+    return column, tag
+
+
+def parse_dicom_tag(value: str) -> Tag:
+    cleaned = value.strip()
+    keyword_tag = tag_for_keyword(cleaned)
+    if keyword_tag is not None:
+        return Tag(keyword_tag)
+
+    hex_text = cleaned
+    if hex_text.startswith("(") and hex_text.endswith(")"):
+        hex_text = hex_text[1:-1]
+    hex_text = hex_text.replace(",", "").replace(" ", "").replace("_", "")
+    if hex_text.lower().startswith("0x"):
+        hex_text = hex_text[2:]
+    if len(hex_text) != 8 or not re.fullmatch(r"[0-9A-Fa-f]{8}", hex_text):
+        raise ValueError(
+            f"Unsupported DICOM tag format: {value}. "
+            "Use a DICOM keyword, 0018,0081, (0018,0081), or 0x00180081."
+        )
+    return Tag(int(hex_text, 16))
+
+
+def safe_column_name(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", value.strip())
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+    return cleaned
+
+
+def unique_column_name(column: str, seen: set[str]) -> str:
+    if column not in seen:
+        return column
+    index = 2
+    while True:
+        candidate = f"{column}_{index}"
+        if candidate not in seen:
+            return candidate
+        index += 1
 
 
 def text_value(value: Any, default: str = "N/A") -> str:
@@ -343,6 +436,12 @@ def tag_value(
     default: str = "N/A",
 ) -> str:
     tag = (group, element)
+    if tag not in ds:
+        return default
+    return text_value(ds[tag].value, default=default)
+
+
+def dicom_tag_value(ds: pydicom.dataset.Dataset, tag: Tag, default: str = "N/A") -> str:
     if tag not in ds:
         return default
     return text_value(ds[tag].value, default=default)
@@ -440,6 +539,7 @@ def file_context(
     patient_mode: str,
     input_root: Path,
     source: Path,
+    dicom_tag_specs: list[DicomTagSpec],
 ) -> dict[str, str]:
     series_uid = ds_value(ds, "SeriesInstanceUID")
     sop_uid = ds_value(ds, "SOPInstanceUID")
@@ -456,6 +556,68 @@ def file_context(
     siemens_ice_dims = tag_value(ds, 0x0021, 0x118E)
     siemens_dim_channel, siemens_dim_echo = parse_siemens_ice_dims(siemens_ice_dims)
 
+    row = {
+        "SeriesUID": series_uid,
+        "SOPInstanceUID": sop_uid,
+        "SeriesNumber": series_number(ds),
+        "SeriesDescription": ds_value(ds, "SeriesDescription"),
+        "InstanceNumber": str(inst),
+        "AcquisitionDate": ds_value(
+            ds,
+            "AcquisitionDate",
+            default=ds_value(ds, "StudyDate", default="unknown_date"),
+        ),
+        "AcquisitionTime": ds_value(ds, "AcquisitionTime"),
+        "PatientName": patient_name,
+        "Modality": ds_value(ds, "Modality"),
+        "TR_ms": ds_value(ds, "RepetitionTime"),
+        "TE_ms": ds_value(ds, "EchoTime"),
+        "FOV_HxW_mm": fov_text(ds),
+        "Matrix_RowsxCols": matrix_text(ds),
+        "PixelBandwidth_Hz_per_px": ds_value(ds, "PixelBandwidth"),
+        "EchoTrainLength": ds_value(ds, "EchoTrainLength"),
+        "FlipAngle_deg": ds_value(ds, "FlipAngle"),
+        "SliceThickness_mm": ds_value(ds, "SliceThickness"),
+        "SpacingBetweenSlices_mm": ds_value(ds, "SpacingBetweenSlices"),
+        "SliceLocation_mm": ds_value(ds, "SliceLocation"),
+        "NumberOfAverages": ds_value(ds, "NumberOfAverages"),
+        "MagneticFieldStrength_T": ds_value(ds, "MagneticFieldStrength"),
+        "ScanningSequence": ds_value(ds, "ScanningSequence"),
+        "SequenceVariant": ds_value(ds, "SequenceVariant"),
+        "PhaseEncodingDirection": phase_encoding_direction,
+        "InPlanePhaseEncodingDirection": phase_encoding_direction,
+        "Manufacturer": ds_value(ds, "Manufacturer"),
+        "ManufacturerModelName": ds_value(ds, "ManufacturerModelName"),
+        "ReceiveCoilName": ds_value(ds, "ReceiveCoilName"),
+        "SourceFileName": source.relative_to(input_root).as_posix(),
+        "ProtocolName": ds_value(ds, "ProtocolName"),
+        "ImageType": image_type,
+        "MRAcquisitionType": ds_value(ds, "MRAcquisitionType"),
+        "Rows": ds_value(ds, "Rows"),
+        "Columns": ds_value(ds, "Columns"),
+        "PixelSpacing": pixel_spacing(ds),
+        "ImagePositionPatient": ds_value(ds, "ImagePositionPatient"),
+        "ImageOrientationPatient": ds_value(ds, "ImageOrientationPatient"),
+        "FrameOfReferenceUID": ds_value(ds, "FrameOfReferenceUID"),
+        "StudyInstanceUID": ds_value(ds, "StudyInstanceUID"),
+        "StudyDate": ds_value(ds, "StudyDate"),
+        "StudyTime": ds_value(ds, "StudyTime"),
+        "SeriesDate": ds_value(ds, "SeriesDate"),
+        "SeriesTime": ds_value(ds, "SeriesTime"),
+        "PatientID": patient_id,
+        "PatientIDHash": patient_id_hash,
+        "PatientNameHash": patient_hash,
+        "SOPClassUID": ds_value(ds, "SOPClassUID"),
+        "SiemensChannelMixing": tag_value(ds, 0x0021, 0x1176),
+        "SiemensCoilElement": tag_value(ds, 0x0021, 0x114F),
+        "SiemensIceDims": siemens_ice_dims,
+        "SiemensIceDimChannel": siemens_dim_channel,
+        "SiemensIceDimEcho": siemens_dim_echo,
+        "IsNormalized": is_normalized(image_type),
+    }
+    for spec in dicom_tag_specs:
+        row[spec.column] = dicom_tag_value(ds, spec.tag)
+
     return {
         "acquisition_date": ds_value(
             ds, "AcquisitionDate", default=ds_value(ds, "StudyDate", default="unknown_date")
@@ -469,65 +631,7 @@ def file_context(
         "instance_number_6": f"{inst:06d}",
         "echo_time_ms": safe_name(float_text(getattr(ds, "EchoTime", "NA"))),
         "siemens_coil_element": safe_name(tag_value(ds, 0x0021, 0x114F)),
-        "row": {
-            "SeriesUID": series_uid,
-            "SOPInstanceUID": sop_uid,
-            "SeriesNumber": series_number(ds),
-            "SeriesDescription": ds_value(ds, "SeriesDescription"),
-            "InstanceNumber": str(inst),
-            "AcquisitionDate": ds_value(
-                ds,
-                "AcquisitionDate",
-                default=ds_value(ds, "StudyDate", default="unknown_date"),
-            ),
-            "AcquisitionTime": ds_value(ds, "AcquisitionTime"),
-            "PatientName": patient_name,
-            "Modality": ds_value(ds, "Modality"),
-            "TR_ms": ds_value(ds, "RepetitionTime"),
-            "TE_ms": ds_value(ds, "EchoTime"),
-            "FOV_HxW_mm": fov_text(ds),
-            "Matrix_RowsxCols": matrix_text(ds),
-            "PixelBandwidth_Hz_per_px": ds_value(ds, "PixelBandwidth"),
-            "EchoTrainLength": ds_value(ds, "EchoTrainLength"),
-            "FlipAngle_deg": ds_value(ds, "FlipAngle"),
-            "SliceThickness_mm": ds_value(ds, "SliceThickness"),
-            "SpacingBetweenSlices_mm": ds_value(ds, "SpacingBetweenSlices"),
-            "SliceLocation_mm": ds_value(ds, "SliceLocation"),
-            "NumberOfAverages": ds_value(ds, "NumberOfAverages"),
-            "MagneticFieldStrength_T": ds_value(ds, "MagneticFieldStrength"),
-            "ScanningSequence": ds_value(ds, "ScanningSequence"),
-            "SequenceVariant": ds_value(ds, "SequenceVariant"),
-            "PhaseEncodingDirection": phase_encoding_direction,
-            "InPlanePhaseEncodingDirection": phase_encoding_direction,
-            "Manufacturer": ds_value(ds, "Manufacturer"),
-            "ManufacturerModelName": ds_value(ds, "ManufacturerModelName"),
-            "ReceiveCoilName": ds_value(ds, "ReceiveCoilName"),
-            "SourceFileName": source.relative_to(input_root).as_posix(),
-            "ProtocolName": ds_value(ds, "ProtocolName"),
-            "ImageType": image_type,
-            "MRAcquisitionType": ds_value(ds, "MRAcquisitionType"),
-            "Rows": ds_value(ds, "Rows"),
-            "Columns": ds_value(ds, "Columns"),
-            "PixelSpacing": pixel_spacing(ds),
-            "ImagePositionPatient": ds_value(ds, "ImagePositionPatient"),
-            "ImageOrientationPatient": ds_value(ds, "ImageOrientationPatient"),
-            "FrameOfReferenceUID": ds_value(ds, "FrameOfReferenceUID"),
-            "StudyInstanceUID": ds_value(ds, "StudyInstanceUID"),
-            "StudyDate": ds_value(ds, "StudyDate"),
-            "StudyTime": ds_value(ds, "StudyTime"),
-            "SeriesDate": ds_value(ds, "SeriesDate"),
-            "SeriesTime": ds_value(ds, "SeriesTime"),
-            "PatientID": patient_id,
-            "PatientIDHash": patient_id_hash,
-            "PatientNameHash": patient_hash,
-            "SOPClassUID": ds_value(ds, "SOPClassUID"),
-            "SiemensChannelMixing": tag_value(ds, 0x0021, 0x1176),
-            "SiemensCoilElement": tag_value(ds, 0x0021, 0x114F),
-            "SiemensIceDims": siemens_ice_dims,
-            "SiemensIceDimChannel": siemens_dim_channel,
-            "SiemensIceDimEcho": siemens_dim_echo,
-            "IsNormalized": is_normalized(image_type),
-        },
+        "row": row,
     }
 
 
@@ -623,6 +727,7 @@ def build_items(args: argparse.Namespace | OrganizeOptions) -> tuple[list[Organi
     stats: Counter[str] = Counter()
     seen_destinations: set[Path] = set()
     items: list[OrganizedItem] = []
+    dicom_tag_specs = parse_dicom_tag_specs(options.dicom_tags)
 
     for source in iter_candidate_files(input_root, output_root, options):
         stats["candidate_files"] += 1
@@ -634,7 +739,14 @@ def build_items(args: argparse.Namespace | OrganizeOptions) -> tuple[list[Organi
             continue
 
         item_index = stats["dicom_files"] + 1
-        context = file_context(ds, item_index, options.patient_mode, input_root, source)
+        context = file_context(
+            ds,
+            item_index,
+            options.patient_mode,
+            input_root,
+            source,
+            dicom_tag_specs,
+        )
         acquisition_date = context["acquisition_date"]
         series_dir = safe_name(format_template(options.series_dir_template, context, "series-dir"))
         filename = safe_name(format_template(options.file_template, context, "file"))
@@ -656,7 +768,12 @@ def build_items(args: argparse.Namespace | OrganizeOptions) -> tuple[list[Organi
     return items, stats
 
 
-def write_metadata_tables(output_root: Path, items: list[OrganizedItem]) -> None:
+def write_metadata_tables(
+    output_root: Path,
+    items: list[OrganizedItem],
+    extra_metadata_columns: list[str] | None = None,
+) -> None:
+    metadata_columns = METADATA_COLUMNS + (extra_metadata_columns or [])
     by_date: dict[str, list[OrganizedItem]] = defaultdict(list)
     for item in items:
         by_date[item.row["AcquisitionDate"]].append(item)
@@ -671,7 +788,7 @@ def write_metadata_tables(output_root: Path, items: list[OrganizedItem]) -> None
                 row["OrganizedFileName"],
             ),
         )
-        write_csv(date_dir / "mri_parameters.csv", METADATA_COLUMNS, rows)
+        write_csv(date_dir / "mri_parameters.csv", metadata_columns, rows)
         write_csv(date_dir / "series_summary.csv", SUMMARY_COLUMNS, build_series_summary(rows))
 
 
@@ -760,6 +877,7 @@ def write_run_summary(
         "if_exists": options.if_exists,
         "force_read": options.force_read,
         "patient_mode": options.patient_mode,
+        "dicom_tags": list(options.dicom_tags),
         "candidate_files": stats["candidate_files"],
         "organized_files": len(items),
         "skipped_non_dicom": stats["skipped_non_dicom"],
@@ -809,6 +927,7 @@ def run(args: argparse.Namespace | OrganizeOptions, *, dry_run: bool | None = No
     started_at = datetime.now(timezone.utc).isoformat()
 
     items, stats = build_items(options)
+    dicom_tag_specs = parse_dicom_tag_specs(options.dicom_tags)
 
     if not options.dry_run:
         for item in items:
@@ -819,7 +938,11 @@ def run(args: argparse.Namespace | OrganizeOptions, *, dry_run: bool | None = No
                 action=options.action,
                 overwrite=options.if_exists == "overwrite",
             )
-        write_metadata_tables(options.output_root, items)
+        write_metadata_tables(
+            options.output_root,
+            items,
+            extra_metadata_columns=[spec.column for spec in dicom_tag_specs],
+        )
         ended_at = datetime.now(timezone.utc).isoformat()
         write_run_summary(options.output_root, items, stats, options, started_at, ended_at)
     else:

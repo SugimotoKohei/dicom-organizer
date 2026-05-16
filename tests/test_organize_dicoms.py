@@ -74,6 +74,7 @@ def args_for(input_root: Path, output_root: Path, **overrides: object) -> argpar
         "series_dir_template": "{series_number}_{series_uid_hash}",
         "file_template": "{instance_number_6}.dcm",
         "patient_mode": "keep",
+        "dicom_tags": (),
         "verbose": False,
     }
     values.update(overrides)
@@ -233,6 +234,54 @@ def test_patient_mode_keep_hash_and_drop(tmp_path: Path) -> None:
     assert drop_row["PatientID"] == "N/A"
     assert drop_row["PatientNameHash"] != "N/A"
     assert drop_row["PatientIDHash"] != "N/A"
+
+
+def test_custom_dicom_tags_are_written_to_metadata_csv(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "one.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+    )
+
+    run(
+        args_for(
+            input_root,
+            output_root,
+            dicom_tags=(
+                "EchoTime",
+                "0018,0080",
+                "CustomPhase=(0018,1312)",
+                "PrivateMissing=0021,9999",
+            ),
+        )
+    )
+
+    with (output_root / "20260515" / "mri_parameters.csv").open(
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        row = next(csv.DictReader(handle))
+
+    assert row["DICOM_EchoTime"] == "10.0"
+    assert row["DICOM_RepetitionTime"] == "1000.0"
+    assert row["CustomPhase"] == "ROW"
+    assert row["PrivateMissing"] == "N/A"
+
+    with (output_root / "organize_summary.json").open(encoding="utf-8") as handle:
+        assert "EchoTime" in handle.read()
+
+
+def test_invalid_custom_dicom_tag_is_rejected(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    input_root.mkdir()
+
+    with pytest.raises(ValueError, match="Unsupported DICOM tag format"):
+        run(args_for(input_root, tmp_path / "organized", dicom_tags=("not-a-tag",)))
 
 
 def test_if_exists_modes_error_skip_rename_and_overwrite(tmp_path: Path) -> None:

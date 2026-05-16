@@ -260,6 +260,7 @@ class MainWindow(QMainWindow):
             or DEFAULT_SERIES_DIR_TEMPLATE,
             file_template=self.file_template_edit.text().strip() or DEFAULT_FILE_TEMPLATE,
             patient_mode=self.patient_combo.currentText(),
+            dicom_tags=(),
             verbose=False,
         )
 

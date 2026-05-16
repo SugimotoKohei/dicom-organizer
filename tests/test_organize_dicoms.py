@@ -124,6 +124,32 @@ def test_run_dry_run_does_not_write_output(tmp_path: Path) -> None:
     assert not output_root.exists()
 
 
+def test_default_scan_prunes_existing_organized_directory(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = input_root / "organized"
+    input_root.mkdir()
+    output_root.mkdir()
+    write_dicom(
+        input_root / "one.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+    )
+    write_dicom(
+        output_root / "old.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=99,
+        instance_number=1,
+    )
+
+    result = run(args_for(input_root, output_root, dry_run=True))
+
+    assert result.summary["candidate_files"] == 1
+    assert result.summary["organized_files"] == 1
+
+
 def test_run_writes_files_and_metadata(tmp_path: Path) -> None:
     input_root = tmp_path / "input"
     output_root = tmp_path / "organized"

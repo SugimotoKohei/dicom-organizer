@@ -652,12 +652,41 @@ def should_skip(path: Path, input_root: Path, output_root: Path, options: Organi
 
 
 def iter_candidate_files(input_root: Path, output_root: Path, options: OrganizeOptions):
-    for path in sorted(input_root.rglob("*")):
-        if not path.is_file():
-            continue
-        if should_skip(path, input_root, output_root, options):
-            continue
-        yield path
+    for root, dirnames, filenames in os.walk(input_root):
+        root_path = Path(root)
+        kept_dirnames = []
+        for dirname in sorted(dirnames):
+            dir_path = root_path / dirname
+            if should_prune_dir(dir_path, input_root, output_root, options):
+                continue
+            kept_dirnames.append(dirname)
+        dirnames[:] = kept_dirnames
+
+        for filename in sorted(filenames):
+            path = root_path / filename
+            if should_skip(path, input_root, output_root, options):
+                continue
+            yield path
+
+
+def should_prune_dir(
+    path: Path,
+    input_root: Path,
+    output_root: Path,
+    options: OrganizeOptions,
+) -> bool:
+    try:
+        path.relative_to(output_root)
+        return True
+    except ValueError:
+        pass
+
+    rel_parts = path.relative_to(input_root).parts
+    if not options.include_hidden and any(part.startswith(".") for part in rel_parts):
+        return True
+    if not options.include_organized and any(part == "organized" for part in rel_parts):
+        return True
+    return False
 
 
 def read_dicom_header(path: Path, force: bool) -> pydicom.dataset.Dataset | None:

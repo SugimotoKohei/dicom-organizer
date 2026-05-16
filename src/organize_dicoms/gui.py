@@ -94,7 +94,6 @@ PREVIEW_COLUMNS = [
     "Rows",
     "Columns",
     "FOV_HxW_mm",
-    "PhaseEncodingDirection",
     "Manufacturer",
     "ManufacturerModelName",
 ]

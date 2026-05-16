@@ -49,6 +49,7 @@ organize-dicoms --input /path/to/dicom-root \
 
 タグは DICOM keyword、`0018,0080`、`(0018,0080)`、`0x00180080` の形式を受け付けます。
 列名を指定しない場合は `DICOM_EchoTime` のような列名で出力します。
+位相エンコード方向など標準出力に含めないタグも、必要な場合は `--dicom-tag InPlanePhaseEncodingDirection` のように追加できます。
 
 ## GUI
 

@@ -190,16 +190,16 @@ def test_run_writes_files_and_metadata(tmp_path: Path) -> None:
     assert rows[0]["FOV_HxW_mm"] == "24x24"
     assert rows[0]["Matrix_RowsxCols"] == "16x16"
     assert rows[0]["TR_ms"] == "1000.0"
-    assert rows[0]["PhaseEncodingDirection"] == "ROW"
-    assert rows[0]["InPlanePhaseEncodingDirection"] == "ROW"
+    assert "PhaseEncodingDirection" not in rows[0]
+    assert "InPlanePhaseEncodingDirection" not in rows[0]
     assert all("(" not in column and ")" not in column for column in rows[0])
 
     with (date_dir / "mri_parameters.csv").open(encoding="utf-8-sig", newline="") as handle:
         metadata_row = next(csv.DictReader(handle))
     assert metadata_row["TE_ms"] == "10.0"
     assert metadata_row["PixelBandwidth_Hz_per_px"] == "N/A"
-    assert metadata_row["PhaseEncodingDirection"] == "ROW"
-    assert metadata_row["InPlanePhaseEncodingDirection"] == "ROW"
+    assert "PhaseEncodingDirection" not in metadata_row
+    assert "InPlanePhaseEncodingDirection" not in metadata_row
     assert all("(" not in column and ")" not in column for column in metadata_row)
 
 
@@ -332,6 +332,7 @@ def test_custom_dicom_tags_are_written_to_metadata_csv(tmp_path: Path) -> None:
                 "EchoTime",
                 "0018,0080",
                 "CustomPhase=(0018,1312)",
+                "InPlanePhaseEncodingDirection",
                 "PrivateMissing=0021,9999",
             ),
         )
@@ -346,6 +347,7 @@ def test_custom_dicom_tags_are_written_to_metadata_csv(tmp_path: Path) -> None:
     assert row["DICOM_EchoTime"] == "10.0"
     assert row["DICOM_RepetitionTime"] == "1000.0"
     assert row["CustomPhase"] == "ROW"
+    assert row["DICOM_InPlanePhaseEncodingDirection"] == "ROW"
     assert row["PrivateMissing"] == "N/A"
 
     with (output_root / "organize_summary.json").open(encoding="utf-8") as handle:

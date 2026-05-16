@@ -62,8 +62,6 @@ BASE_METADATA_COLUMNS = [
     "MagneticFieldStrength_T",
     "ScanningSequence",
     "SequenceVariant",
-    "PhaseEncodingDirection",
-    "InPlanePhaseEncodingDirection",
     "Manufacturer",
     "ManufacturerModelName",
     "ReceiveCoilName",
@@ -120,8 +118,6 @@ SUMMARY_COLUMNS = [
     "TR_ms",
     "EchoTrainLength",
     "NumberOfAverages",
-    "PhaseEncodingDirection",
-    "InPlanePhaseEncodingDirection",
     "Manufacturer",
     "ManufacturerModelName",
     "ReceiveCoilName",
@@ -552,7 +548,6 @@ def file_context(
         ds_value(ds, "PatientID", default=""),
         patient_mode,
     )
-    phase_encoding_direction = ds_value(ds, "InPlanePhaseEncodingDirection")
     siemens_ice_dims = tag_value(ds, 0x0021, 0x118E)
     siemens_dim_channel, siemens_dim_echo = parse_siemens_ice_dims(siemens_ice_dims)
 
@@ -584,8 +579,6 @@ def file_context(
         "MagneticFieldStrength_T": ds_value(ds, "MagneticFieldStrength"),
         "ScanningSequence": ds_value(ds, "ScanningSequence"),
         "SequenceVariant": ds_value(ds, "SequenceVariant"),
-        "PhaseEncodingDirection": phase_encoding_direction,
-        "InPlanePhaseEncodingDirection": phase_encoding_direction,
         "Manufacturer": ds_value(ds, "Manufacturer"),
         "ManufacturerModelName": ds_value(ds, "ManufacturerModelName"),
         "ReceiveCoilName": ds_value(ds, "ReceiveCoilName"),
@@ -930,8 +923,6 @@ def build_series_summary(rows: list[dict[str, str]]) -> list[dict[str, str]]:
                 "TR_ms": first["TR_ms"],
                 "EchoTrainLength": first["EchoTrainLength"],
                 "NumberOfAverages": first["NumberOfAverages"],
-                "PhaseEncodingDirection": first["PhaseEncodingDirection"],
-                "InPlanePhaseEncodingDirection": first["InPlanePhaseEncodingDirection"],
                 "Manufacturer": first["Manufacturer"],
                 "ManufacturerModelName": first["ManufacturerModelName"],
                 "ReceiveCoilName": first["ReceiveCoilName"],

@@ -8,8 +8,8 @@ occur, but they should be documented here.
 
 ## 0.1.0 - Unreleased
 
-- Package the DICOM organizer as the `organize-dicoms` CLI.
-- Keep the `dicom-organizer` compatibility alias.
+- Package the project as `dicom-organizer`.
+- Provide the `dicom-organizer` CLI.
 - Add optional PySide6 GUI support through the `gui` extra.
 - Organize DICOM files by acquisition date and series.
 - Use protocol names in default series directory names.

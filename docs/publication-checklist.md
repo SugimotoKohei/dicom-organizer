@@ -25,7 +25,7 @@ tree instead.
 
 ## PyPI Name
 
-The JSON API endpoint `https://pypi.org/pypi/organize-dicoms/json` returned
+The JSON API endpoint `https://pypi.org/pypi/dicom-organizer/json` returned
 `404` during preparation on 2026-05-16, which indicates that the project name
 was not registered at that time. Recheck immediately before the first release.
 
@@ -42,14 +42,14 @@ was not registered at that time. Recheck immediately before the first release.
 
 Create pending Trusted Publisher entries before the first upload:
 
-- PyPI project: `organize-dicoms`
-- Owner/repository: `SugimotoKohei/organize-dicoms`
+- PyPI project: `dicom-organizer`
+- Owner/repository: `SugimotoKohei/dicom-organizer`
 - Workflow: `release.yml`
 - Environment: `pypi`
 
 Optional TestPyPI entry:
 
-- Project: `organize-dicoms`
+- Project: `dicom-organizer`
 - Workflow: `testpypi.yml`
 - Environment: `testpypi`
 
@@ -63,15 +63,14 @@ uv sync --locked
 uv run pytest
 uv run ruff check
 uv build
-uv run organize-dicoms --help
 uv run dicom-organizer --help
-uv run organize-dicoms-gui --help
+uv run dicom-organizer-gui --help
 uv run python examples/synthetic_quickstart.py
 ```
 
 After publishing:
 
 ```bash
-uv tool install organize-dicoms --force
-organize-dicoms --help
+uv tool install dicom-organizer --force
+dicom-organizer --help
 ```

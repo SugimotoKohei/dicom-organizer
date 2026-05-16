@@ -1,4 +1,4 @@
-"""PySide6 GUI for organize-dicoms."""
+"""PySide6 GUI for dicom-organizer."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from organize_dicoms.core import (
+from dicom_organizer.core import (
     DEFAULT_FILE_TEMPLATE,
     DEFAULT_SERIES_DIR_TEMPLATE,
     OrganizedItem,
@@ -127,7 +127,7 @@ class Worker(QObject):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("organize-dicoms")
+        self.setWindowTitle("dicom-organizer")
         self.resize(1180, 760)
         self.thread: QThread | None = None
         self.worker: Worker | None = None
@@ -351,9 +351,9 @@ class MainWindow(QMainWindow):
 
 def main() -> int:
     if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
-        print("usage: organize-dicoms-gui")
+        print("usage: dicom-organizer-gui")
         print()
-        print("Launch the PySide6 GUI for organize-dicoms.")
+        print("Launch the PySide6 GUI for dicom-organizer.")
         return 0
     if PYSIDE_IMPORT_ERROR is not None:
         print(

@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for considering a contribution to `organize-dicoms`.
+Thank you for considering a contribution to `dicom-organizer`.
 
 ## Development Setup
 
@@ -19,7 +19,7 @@ uv build
 - Do not commit real DICOM data, generated organized outputs, patient
   information, credentials, or local machine paths.
 - Use synthetic DICOM files in tests.
-- Keep CLI and GUI behavior aligned through `src/organize_dicoms/core.py`.
+- Keep CLI and GUI behavior aligned through `src/dicom_organizer/core.py`.
 - Add or update tests when behavior changes.
 - Update README or CHANGELOG when public behavior changes.
 

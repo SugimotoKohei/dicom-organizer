@@ -5,4 +5,4 @@
 - 破壊的変更・不可逆操作は事前に確認する。
 - Python 実行環境は uv を使い、Python 3.11 系を前提にする。
 - DICOMサンプルや出力結果などの実データは Git 管理しない。
-- CLI と GUI は `src/organize_dicoms/core.py` の同じ中核処理を使い、挙動差を作らない。
+- CLI と GUI は `src/dicom_organizer/core.py` の同じ中核処理を使い、挙動差を作らない。

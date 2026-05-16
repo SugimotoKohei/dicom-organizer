@@ -49,10 +49,9 @@ jobs:
 
       - name: CLI smoke tests
         run: |
-          uv run organize-dicoms --help
           uv run dicom-organizer --help
-          uv run python -m organize_dicoms.core --help
-          uv run organize-dicoms-gui --help
+          uv run python -c "import dicom_organizer; import dicom_organizer.core"
+          uv run dicom-organizer-gui --help
 
       - name: Synthetic workflow smoke test
         run: uv run python examples/synthetic_quickstart.py

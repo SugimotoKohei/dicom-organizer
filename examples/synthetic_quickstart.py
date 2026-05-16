@@ -1,4 +1,4 @@
-"""Create synthetic DICOM files and run organize-dicoms.
+"""Create synthetic DICOM files and run dicom-organizer.
 
 This example intentionally avoids real patient or scanner data.
 """
@@ -48,7 +48,7 @@ def write_synthetic_dicom(path: Path, *, series_uid: str, series_number: int, in
 
 
 def main() -> int:
-    with tempfile.TemporaryDirectory(prefix="organize-dicoms-example-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="dicom-organizer-example-") as tmp:
         root = Path(tmp)
         input_root = root / "input"
         input_root.mkdir()
@@ -64,7 +64,7 @@ def main() -> int:
                 )
 
         command = [
-            "organize-dicoms",
+            "dicom-organizer",
             "--input",
             str(input_root),
             "--patient-mode",

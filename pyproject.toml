@@ -3,7 +3,7 @@ requires = ["setuptools>=75.6"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "organize-dicoms"
+name = "dicom-organizer"
 version = "0.1.0"
 description = "Local DICOM organizer with CLI and optional PySide6 GUI"
 readme = { file = "README.md", content-type = "text/markdown" }
@@ -41,10 +41,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/SugimotoKohei/organize-dicoms"
-Repository = "https://github.com/SugimotoKohei/organize-dicoms"
-Issues = "https://github.com/SugimotoKohei/organize-dicoms/issues"
-Changelog = "https://github.com/SugimotoKohei/organize-dicoms/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/SugimotoKohei/dicom-organizer"
+Repository = "https://github.com/SugimotoKohei/dicom-organizer"
+Issues = "https://github.com/SugimotoKohei/dicom-organizer/issues"
+Changelog = "https://github.com/SugimotoKohei/dicom-organizer/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 gui = [
@@ -58,13 +58,12 @@ dev = [
 ]
 
 [project.scripts]
-organize-dicoms = "organize_dicoms.cli:main"
-organize-dicoms-gui = "organize_dicoms.gui:main"
-dicom-organizer = "organize_dicoms.cli:main"
+dicom-organizer = "dicom_organizer.cli:main"
+dicom-organizer-gui = "dicom_organizer.gui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["organize_dicoms*"]
+include = ["dicom_organizer*"]
 
 [tool.setuptools.package-dir]
 "" = "src"

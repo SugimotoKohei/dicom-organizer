@@ -10,7 +10,7 @@ import pytest
 from pydicom.dataset import FileDataset, FileMetaDataset
 from pydicom.uid import ExplicitVRLittleEndian, MRImageStorage, generate_uid
 
-from organize_dicoms.core import build_items, run
+from dicom_organizer.core import build_items, run
 
 
 def write_dicom(
@@ -419,12 +419,11 @@ def test_if_exists_modes_error_skip_rename_and_overwrite(tmp_path: Path) -> None
     assert original.exists()
 
 
-def test_cli_alias_help() -> None:
+def test_package_imports() -> None:
     result = subprocess.run(
-        [sys.executable, "-m", "organize_dicoms.core", "--help"],
+        [sys.executable, "-c", "import dicom_organizer; import dicom_organizer.core"],
         check=False,
         capture_output=True,
         text=True,
     )
     assert result.returncode == 0
-    assert "--input" in result.stdout

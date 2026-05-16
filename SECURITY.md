@@ -3,7 +3,7 @@
 ## Supported Versions
 
 Security fixes are provided for the latest released version of
-`organize-dicoms`.
+`dicom-organizer`.
 
 ## Reporting a Vulnerability
 
@@ -16,12 +16,12 @@ contact path and include no private data in the issue.
 
 ## Patient Data And PHI
 
-`organize-dicoms` is not a complete DICOM de-identification tool. It can reduce
+`dicom-organizer` is not a complete DICOM de-identification tool. It can reduce
 patient metadata written to its own CSV outputs with:
 
 ```bash
-organize-dicoms --input /path/to/dicom-root --patient-mode hash
-organize-dicoms --input /path/to/dicom-root --patient-mode drop
+dicom-organizer --input /path/to/dicom-root --patient-mode hash
+dicom-organizer --input /path/to/dicom-root --patient-mode drop
 ```
 
 The default is `--patient-mode keep`, which writes `PatientName` and

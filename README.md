@@ -1,6 +1,6 @@
-# organize-dicoms
+# dicom-organizer
 
-[![CI](https://github.com/SugimotoKohei/organize-dicoms/actions/workflows/ci.yml/badge.svg)](https://github.com/SugimotoKohei/organize-dicoms/actions/workflows/ci.yml)
+[![CI](https://github.com/SugimotoKohei/dicom-organizer/actions/workflows/ci.yml/badge.svg)](https://github.com/SugimotoKohei/dicom-organizer/actions/workflows/ci.yml)
 
 DICOMファイルを日付・シリーズごとに整理し、撮像条件のCSVを作るコマンドです。
 
@@ -11,14 +11,14 @@ DICOMファイルを日付・シリーズごとに整理し、撮像条件のCSV
 PyPI公開後:
 
 ```bash
-uv tool install organize-dicoms
+uv tool install dicom-organizer
 ```
 
 このリポジトリから使う場合:
 
 ```bash
-git clone https://github.com/SugimotoKohei/organize-dicoms.git
-cd organize-dicoms
+git clone https://github.com/SugimotoKohei/dicom-organizer.git
+cd dicom-organizer
 uv tool install --editable . --force
 ```
 
@@ -27,13 +27,13 @@ uv tool install --editable . --force
 まずdry-runで確認します。
 
 ```bash
-organize-dicoms --input /path/to/dicom-root --dry-run --force-read --if-exists skip
+dicom-organizer --input /path/to/dicom-root --dry-run --force-read --if-exists skip
 ```
 
 問題なければ実行します。
 
 ```bash
-organize-dicoms --input /path/to/dicom-root --force-read --if-exists skip
+dicom-organizer --input /path/to/dicom-root --force-read --if-exists skip
 ```
 
 既定では `<input>/organized/` にコピーされます。元ファイルは消えません。
@@ -52,21 +52,21 @@ organized/organize_summary.json
 患者情報をCSVに残したくない場合:
 
 ```bash
-organize-dicoms --input /path/to/dicom-root --patient-mode hash
-organize-dicoms --input /path/to/dicom-root --patient-mode drop
+dicom-organizer --input /path/to/dicom-root --patient-mode hash
+dicom-organizer --input /path/to/dicom-root --patient-mode drop
 ```
 
 任意のDICOMタグをCSVに追加する場合:
 
 ```bash
-organize-dicoms --input /path/to/dicom-root --dicom-tag EchoTime --dicom-tag InPlanePhaseEncodingDirection
+dicom-organizer --input /path/to/dicom-root --dicom-tag EchoTime --dicom-tag InPlanePhaseEncodingDirection
 ```
 
 GUIを使う場合:
 
 ```bash
-uv tool install 'organize-dicoms[gui]'
-organize-dicoms-gui
+uv tool install 'dicom-organizer[gui]'
+dicom-organizer-gui
 ```
 
 実DICOMなしで試す場合:
@@ -84,14 +84,14 @@ uv run python examples/synthetic_quickstart.py
 After the first PyPI release:
 
 ```bash
-uv tool install organize-dicoms
+uv tool install dicom-organizer
 ```
 
 From this repository:
 
 ```bash
-git clone https://github.com/SugimotoKohei/organize-dicoms.git
-cd organize-dicoms
+git clone https://github.com/SugimotoKohei/dicom-organizer.git
+cd dicom-organizer
 uv tool install --editable . --force
 ```
 
@@ -100,13 +100,13 @@ uv tool install --editable . --force
 Run a dry run first.
 
 ```bash
-organize-dicoms --input /path/to/dicom-root --dry-run --force-read --if-exists skip
+dicom-organizer --input /path/to/dicom-root --dry-run --force-read --if-exists skip
 ```
 
 Then run the organizer.
 
 ```bash
-organize-dicoms --input /path/to/dicom-root --force-read --if-exists skip
+dicom-organizer --input /path/to/dicom-root --force-read --if-exists skip
 ```
 
 By default, files are copied to `<input>/organized/`. Source files are not removed.
@@ -125,21 +125,21 @@ organized/organize_summary.json
 Avoid writing patient identifiers to CSV:
 
 ```bash
-organize-dicoms --input /path/to/dicom-root --patient-mode hash
-organize-dicoms --input /path/to/dicom-root --patient-mode drop
+dicom-organizer --input /path/to/dicom-root --patient-mode hash
+dicom-organizer --input /path/to/dicom-root --patient-mode drop
 ```
 
 Add extra DICOM tags to the CSV:
 
 ```bash
-organize-dicoms --input /path/to/dicom-root --dicom-tag EchoTime --dicom-tag InPlanePhaseEncodingDirection
+dicom-organizer --input /path/to/dicom-root --dicom-tag EchoTime --dicom-tag InPlanePhaseEncodingDirection
 ```
 
 Use the optional GUI:
 
 ```bash
-uv tool install 'organize-dicoms[gui]'
-organize-dicoms-gui
+uv tool install 'dicom-organizer[gui]'
+dicom-organizer-gui
 ```
 
 Try it without real DICOM data:

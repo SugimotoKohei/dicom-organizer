@@ -6,11 +6,45 @@ build-backend = "setuptools.build_meta"
 name = "organize-dicoms"
 version = "0.1.0"
 description = "Local DICOM organizer with CLI and optional PySide6 GUI"
-readme = "README.md"
+readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.11,<3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Kohei Sugimoto" },
+]
+maintainers = [
+    { name = "Kohei Sugimoto" },
+]
+keywords = [
+    "dicom",
+    "mri",
+    "medical-imaging",
+    "pydicom",
+    "cli",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Healthcare Industry",
+    "Intended Audience :: Science/Research",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Topic :: Utilities",
+]
 dependencies = [
     "pydicom>=3.0.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/SugimotoKohei/organize-dicoms"
+Repository = "https://github.com/SugimotoKohei/organize-dicoms"
+Issues = "https://github.com/SugimotoKohei/organize-dicoms/issues"
+Changelog = "https://github.com/SugimotoKohei/organize-dicoms/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 gui = [

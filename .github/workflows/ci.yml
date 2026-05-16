@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python 3.11
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check lockfile
+        run: uv lock --check
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Run tests
+        run: uv run pytest
+
+      - name: Run ruff
+        run: uv run ruff check
+
+      - name: Build package
+        run: uv build
+
+      - name: CLI smoke tests
+        run: |
+          uv run organize-dicoms --help
+          uv run dicom-organizer --help
+          uv run python -m organize_dicoms.core --help
+          uv run organize-dicoms-gui --help
+
+      - name: Synthetic workflow smoke test
+        run: uv run python examples/synthetic_quickstart.py

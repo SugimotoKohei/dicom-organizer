@@ -733,6 +733,24 @@ def unique_series_dir(base_dir: Path, used_dirs: set[Path]) -> Path:
         index += 1
 
 
+def assign_series_dirs(
+    base_dir_by_series: dict[tuple[str, str], Path],
+    series_order: list[tuple[str, str]],
+) -> dict[tuple[str, str], Path]:
+    series_by_base_dir: dict[Path, list[tuple[str, str]]] = defaultdict(list)
+    for series_key in series_order:
+        series_by_base_dir[base_dir_by_series[series_key]].append(series_key)
+
+    assigned: dict[tuple[str, str], Path] = {}
+    for base_dir, series_keys in series_by_base_dir.items():
+        if len(series_keys) == 1:
+            assigned[series_keys[0]] = base_dir
+            continue
+        for index, series_key in enumerate(series_keys, start=1):
+            assigned[series_key] = base_dir.with_name(f"{base_dir.name}_{index:02d}")
+    return assigned
+
+
 def materialize(source: Path, destination: Path, action: str, overwrite: bool) -> None:
     if overwrite and destination.exists():
         destination.unlink()
@@ -754,10 +772,11 @@ def build_items(args: argparse.Namespace | OrganizeOptions) -> tuple[list[Organi
     output_root = options.output_root
     stats: Counter[str] = Counter()
     seen_destinations: set[Path] = set()
-    assigned_series_dirs: dict[tuple[str, str], Path] = {}
-    used_series_dirs: set[Path] = set()
     items: list[OrganizedItem] = []
     dicom_tag_specs = parse_dicom_tag_specs(options.dicom_tags)
+    pending: list[tuple[Path, dict[str, Any], Path, str, tuple[str, str]]] = []
+    series_order: list[tuple[str, str]] = []
+    base_dir_by_series: dict[tuple[str, str], Path] = {}
 
     for source in iter_candidate_files(input_root, output_root, options):
         stats["candidate_files"] += 1
@@ -781,14 +800,22 @@ def build_items(args: argparse.Namespace | OrganizeOptions) -> tuple[list[Organi
         series_dir_name = safe_name(
             format_template(options.series_dir_template, context, "series-dir")
         )
-        series_dir = resolve_series_dir(
-            output_root / acquisition_date / series_dir_name,
-            series_key=(acquisition_date, context["series_uid"]),
-            assigned_dirs=assigned_series_dirs,
-            used_dirs=used_series_dirs,
-        )
+        series_key = (acquisition_date, context["series_uid"])
+        base_dir = output_root / acquisition_date / series_dir_name
+        if series_key not in base_dir_by_series:
+            base_dir_by_series[series_key] = base_dir
+            series_order.append(series_key)
         filename = safe_name(format_template(options.file_template, context, "file"))
-        destination = series_dir / filename
+        pending.append((source, context, base_dir, filename, series_key))
+        stats["dicom_files"] += 1
+
+        if options.limit and stats["dicom_files"] >= options.limit:
+            break
+
+    series_dirs = assign_series_dirs(base_dir_by_series, series_order)
+
+    for source, context, _base_dir, filename, series_key in pending:
+        destination = series_dirs[series_key] / filename
         resolved = resolve_collision(destination, seen_destinations, options.if_exists)
         if resolved is None:
             stats["skipped_existing"] += 1
@@ -798,10 +825,6 @@ def build_items(args: argparse.Namespace | OrganizeOptions) -> tuple[list[Organi
         row = dict(context["row"])
         row["OrganizedFileName"] = resolved.relative_to(output_root).as_posix()
         items.append(OrganizedItem(source=source, destination=resolved, row=row))
-        stats["dicom_files"] += 1
-
-        if options.limit and stats["dicom_files"] >= options.limit:
-            break
 
     return items, stats
 

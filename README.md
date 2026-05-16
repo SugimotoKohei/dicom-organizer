@@ -79,7 +79,7 @@ organized/organize_summary.json
 ```
 
 既定のseriesディレクトリ名は `SeriesNumber_ProtocolName` です。
-同じ日付内で同名になる別seriesがある場合は、混在を避けるため `_02` のような連番を付けます。
+同じ日付内で同名になる別seriesがある場合は、混在を避けるため先頭から `_01`, `_02` のような連番を付けます。
 
 ## 患者情報
 

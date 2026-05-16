@@ -222,7 +222,7 @@ def test_duplicate_protocol_series_get_distinct_directories(tmp_path: Path) -> N
     result = run(args_for(input_root, output_root))
     parents = [item.destination.parent.name for item in result.items]
 
-    assert parents == ["000004_Repeated-Protocol", "000004_Repeated-Protocol_02"]
+    assert parents == ["000004_Repeated-Protocol_01", "000004_Repeated-Protocol_02"]
 
 
 def test_run_rejects_missing_input_directory(tmp_path: Path) -> None:

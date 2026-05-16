@@ -23,6 +23,7 @@ def write_dicom(
     patient_name: str = "Test^Patient",
     acquisition_date: str = "20260515",
     echo_time: float = 10.0,
+    phase_encoding_direction: str = "ROW",
 ) -> None:
     file_meta = FileMetaDataset()
     file_meta.MediaStorageSOPClassUID = MRImageStorage
@@ -48,6 +49,7 @@ def write_dicom(
     ds.PatientID = "PID001"
     ds.RepetitionTime = 1000
     ds.EchoTime = echo_time
+    ds.InPlanePhaseEncodingDirection = phase_encoding_direction
     ds.Rows = 16
     ds.Columns = 16
     ds.PixelSpacing = [1.5, 1.5]
@@ -155,6 +157,21 @@ def test_run_writes_files_and_metadata(tmp_path: Path) -> None:
         rows = list(csv.DictReader(handle))
     assert [row["SeriesNumber"] for row in rows] == ["000001", "000002"]
     assert [row["FileCount"] for row in rows] == ["1", "1"]
+    assert rows[0]["EchoTimes_ms"] == "10.0"
+    assert rows[0]["FOV_HxW_mm"] == "24x24"
+    assert rows[0]["Matrix_RowsxCols"] == "16x16"
+    assert rows[0]["TR_ms"] == "1000.0"
+    assert rows[0]["PhaseEncodingDirection"] == "ROW"
+    assert rows[0]["InPlanePhaseEncodingDirection"] == "ROW"
+    assert all("(" not in column and ")" not in column for column in rows[0])
+
+    with (date_dir / "mri_parameters.csv").open(encoding="utf-8-sig", newline="") as handle:
+        metadata_row = next(csv.DictReader(handle))
+    assert metadata_row["TE_ms"] == "10.0"
+    assert metadata_row["PixelBandwidth_Hz_per_px"] == "N/A"
+    assert metadata_row["PhaseEncodingDirection"] == "ROW"
+    assert metadata_row["InPlanePhaseEncodingDirection"] == "ROW"
+    assert all("(" not in column and ")" not in column for column in metadata_row)
 
 
 def test_run_rejects_missing_input_directory(tmp_path: Path) -> None:

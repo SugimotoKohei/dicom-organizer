@@ -51,6 +51,14 @@ def write_dicom(
     ds.RepetitionTime = 1000
     ds.EchoTime = echo_time
     ds.InPlanePhaseEncodingDirection = phase_encoding_direction
+    ds.SequenceName = "tse"
+    ds.InversionTime = 120
+    ds.EchoNumbers = 1
+    ds.AcquisitionMatrix = [0, 16, 16, 0]
+    ds.NumberOfPhaseEncodingSteps = 12
+    ds.PercentSampling = 80
+    ds.PercentPhaseFieldOfView = 75
+    ds.SAR = 0.42
     ds.Rows = 16
     ds.Columns = 16
     ds.PixelSpacing = [1.5, 1.5]
@@ -190,6 +198,13 @@ def test_run_writes_files_and_metadata(tmp_path: Path) -> None:
     assert rows[0]["FOV_HxW_mm"] == "24x24"
     assert rows[0]["Matrix_RowsxCols"] == "16x16"
     assert rows[0]["TR_ms"] == "1000.0"
+    assert rows[0]["InversionTime_ms"] == "120.0"
+    assert rows[0]["EchoNumbers"] == "1"
+    assert rows[0]["AcquisitionMatrix"] == "0\\16\\16\\0"
+    assert rows[0]["NumberOfPhaseEncodingSteps"] == "12"
+    assert rows[0]["PercentSampling"] == "80.0"
+    assert rows[0]["PercentPhaseFOV"] == "75.0"
+    assert rows[0]["SAR"] == "0.42"
     assert "PhaseEncodingDirection" not in rows[0]
     assert "InPlanePhaseEncodingDirection" not in rows[0]
     assert all("(" not in column and ")" not in column for column in rows[0])
@@ -198,6 +213,14 @@ def test_run_writes_files_and_metadata(tmp_path: Path) -> None:
         metadata_row = next(csv.DictReader(handle))
     assert metadata_row["TE_ms"] == "10.0"
     assert metadata_row["PixelBandwidth_Hz_per_px"] == "N/A"
+    assert metadata_row["SequenceName"] == "tse"
+    assert metadata_row["InversionTime_ms"] == "120.0"
+    assert metadata_row["EchoNumbers"] == "1"
+    assert metadata_row["AcquisitionMatrix"] == "0\\16\\16\\0"
+    assert metadata_row["NumberOfPhaseEncodingSteps"] == "12"
+    assert metadata_row["PercentSampling"] == "80.0"
+    assert metadata_row["PercentPhaseFOV"] == "75.0"
+    assert metadata_row["SAR"] == "0.42"
     assert "PhaseEncodingDirection" not in metadata_row
     assert "InPlanePhaseEncodingDirection" not in metadata_row
     assert all("(" not in column and ")" not in column for column in metadata_row)

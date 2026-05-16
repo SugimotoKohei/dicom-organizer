@@ -51,6 +51,11 @@ organize-dicoms --input /path/to/dicom-root \
 列名を指定しない場合は `DICOM_EchoTime` のような列名で出力します。
 位相エンコード方向など標準出力に含めないタグも、必要な場合は `--dicom-tag InPlanePhaseEncodingDirection` のように追加できます。
 
+標準の撮像条件として、TR/TE、FOV、matrix、pixel bandwidth、echo train length、flip angle、slice thickness、
+NEX、磁場強度、sequence/protocol系情報に加えて、`SequenceName`、`InversionTime_ms`、
+`EchoNumbers`、`AcquisitionMatrix`、`NumberOfPhaseEncodingSteps`、`PercentSampling`、
+`PercentPhaseFOV`、`SAR` を出力します。
+
 ## GUI
 
 GUI を使う場合だけ `gui` extra を入れてください。

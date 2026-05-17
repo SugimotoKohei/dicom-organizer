@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import importlib.metadata
 import json
 import os
 import re
@@ -47,6 +48,16 @@ from pydicom.uid import (
     UltrasoundImageStorage,
     XRayAngiographicImageStorage,
 )
+
+__version__ = "0.1.1"
+
+
+def package_version() -> str:
+    try:
+        return importlib.metadata.version("dicom-organizer")
+    except importlib.metadata.PackageNotFoundError:
+        return __version__
+
 
 def merge_columns(*groups: list[str] | tuple[str, ...]) -> list[str]:
     merged: list[str] = []
@@ -338,12 +349,17 @@ class OrganizeResult:
 
     @property
     def summary(self) -> dict[str, Any]:
-        return summarize_items(self.items, self.stats, self.output_root)
+        return summarize_items(self.items, self.stats, self.output_root, self.profile)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Organize DICOM files by AcquisitionDate and SeriesInstanceUID."
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {package_version()}",
     )
     parser.add_argument(
         "--input",
@@ -1473,6 +1489,7 @@ def write_run_summary(
 ) -> None:
     by_series = Counter(item.destination.parent.relative_to(output_root).as_posix() for item in items)
     by_date = Counter(item.row["AcquisitionDate"] for item in items)
+    summary_counts = summarize_items(items, stats, output_root, options.profile)
     summary = {
         "started_at": started_at,
         "ended_at": ended_at,
@@ -1487,6 +1504,8 @@ def write_run_summary(
         "dicom_tags": list(options.dicom_tags),
         "candidate_files": stats["candidate_files"],
         "organized_files": len(items),
+        "csv_target_files": summary_counts["csv_target_files"],
+        "csv_excluded_non_image_files": summary_counts["csv_excluded_non_image_files"],
         "skipped_non_dicom": stats["skipped_non_dicom"],
         "skipped_existing": stats["skipped_existing"],
         "acquisition_dates": dict(sorted(by_date.items())),
@@ -1503,30 +1522,60 @@ def summarize_items(
     items: list[OrganizedItem],
     stats: Counter[str],
     output_root: Path,
+    profile_name: str = "auto",
 ) -> dict[str, Any]:
     by_date = Counter(item.row["AcquisitionDate"] for item in items)
     by_series = Counter(item.destination.parent.relative_to(output_root).as_posix() for item in items)
+    csv_target_files = len(metadata_rows([item.row for item in items], profile_name))
     return {
         "candidate_files": stats["candidate_files"],
         "organized_files": len(items),
+        "csv_target_files": csv_target_files,
+        "csv_excluded_non_image_files": len(items) - csv_target_files,
         "series_count": len(by_series),
         "skipped_non_dicom": stats["skipped_non_dicom"],
         "skipped_existing": stats["skipped_existing"],
         "acquisition_dates": dict(sorted(by_date.items())),
         "output_root": str(output_root),
+        "profile": profile_name,
     }
 
 
-def print_summary(items: list[OrganizedItem], stats: Counter[str], output_root: Path) -> None:
-    summary = summarize_items(items, stats, output_root)
+def planned_metadata_outputs(output_root: Path, items: list[OrganizedItem]) -> list[str]:
+    dates = sorted({item.row["AcquisitionDate"] for item in items})
+    outputs: list[str] = []
+    for acquisition_date in dates:
+        date_dir = output_root / acquisition_date
+        outputs.append((date_dir / "dicom_parameters.csv").as_posix())
+        outputs.append((date_dir / "series_summary.csv").as_posix())
+    outputs.append((output_root / "organize_summary.json").as_posix())
+    return outputs
+
+
+def print_summary(
+    items: list[OrganizedItem],
+    stats: Counter[str],
+    output_root: Path,
+    profile_name: str = "auto",
+    *,
+    dry_run: bool = False,
+) -> None:
+    summary = summarize_items(items, stats, output_root, profile_name)
+    print(f"profile={summary['profile']}")
     print(f"candidate_files={summary['candidate_files']}")
     print(f"organized_files={summary['organized_files']}")
+    print(f"csv_target_files={summary['csv_target_files']}")
+    print(f"csv_excluded_non_image_files={summary['csv_excluded_non_image_files']}")
     print(f"series_count={summary['series_count']}")
     print(f"skipped_non_dicom={summary['skipped_non_dicom']}")
     print(f"skipped_existing={summary['skipped_existing']}")
     for acquisition_date, count in summary["acquisition_dates"].items():
         print(f"{acquisition_date}: files={count}")
     print(f"output_root={output_root}")
+    if dry_run and items:
+        print("planned_metadata_outputs:")
+        for output in planned_metadata_outputs(output_root, items):
+            print(f"  {output}")
 
 
 def run(args: argparse.Namespace | OrganizeOptions, *, dry_run: bool | None = None) -> OrganizeResult:
@@ -1584,12 +1633,24 @@ def main() -> int:
 
     if not result.items:
         print("No DICOM files were organized.", file=sys.stderr)
-        print_summary(result.items, result.stats, result.output_root)
+        print_summary(
+            result.items,
+            result.stats,
+            result.output_root,
+            result.profile,
+            dry_run=result.dry_run,
+        )
         if result.stats["skipped_existing"] > 0:
             return 0
         return 1
 
-    print_summary(result.items, result.stats, result.output_root)
+    print_summary(
+        result.items,
+        result.stats,
+        result.output_root,
+        result.profile,
+        dry_run=result.dry_run,
+    )
     if result.dry_run:
         print("dry_run=true")
     return 0

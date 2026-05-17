@@ -318,7 +318,10 @@ class MainWindow(QMainWindow):
         self._fill_table(items, profile)
         self.log.appendPlainText(
             "Completed: "
+            f"profile={summary['profile']}, "
             f"organized_files={summary['organized_files']}, "
+            f"csv_target_files={summary['csv_target_files']}, "
+            f"csv_excluded_non_image_files={summary['csv_excluded_non_image_files']}, "
             f"series_count={summary['series_count']}, "
             f"skipped_non_dicom={stats['skipped_non_dicom']}, "
             f"skipped_existing={stats['skipped_existing']}, "

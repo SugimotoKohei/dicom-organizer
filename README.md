@@ -33,6 +33,12 @@ Run the organizer:
 dicom-organizer --input /path/to/dicom-root --force-read --if-exists skip
 ```
 
+Check the installed version:
+
+```bash
+dicom-organizer --version
+```
+
 A dry run is optional, but useful when checking a new input folder or output
 template before writing files:
 
@@ -73,6 +79,44 @@ organized/organize_summary.json
 `dicom_parameters.csv` and `series_summary.csv` focus on supported image objects.
 Presentation states and vendor-private helper objects may still be organized into
 folders, but they are excluded from these parameter tables.
+
+Run summaries report both the total organized DICOM files and the files included
+in the CSV parameter tables:
+
+```text
+profile=auto
+organized_files=12
+csv_target_files=10
+csv_excluded_non_image_files=2
+```
+
+During `--dry-run`, no files are written. The summary also lists the metadata
+files that would be created.
+
+### CSV Columns
+
+`dicom_parameters.csv` always starts with common identifiers, dates, patient
+fields, geometry, manufacturer information, source filename, image type, and
+spatial orientation columns. The patient columns follow `--patient-mode`: `keep`
+writes `PatientName` and `PatientID`, `hash` writes `sha256:` digests, and `drop`
+writes `N/A`; hash helper columns are still written for checking.
+
+Profile-specific columns are appended after the common columns:
+
+- `mr`: TR/TE, bandwidth, echo train length, flip angle, averages, field
+  strength, sequence fields, inversion time, echo numbers, acquisition matrix,
+  phase encoding, sampling, SAR, coil, MR acquisition type, and Siemens channel
+  helper fields.
+- `ct`: kVp, tube current, exposure time, convolution kernel, and reconstruction
+  diameter.
+- `us`: transducer, mechanical/thermal index, and color data flag.
+- `xa`: kVp, tube current, exposure time, frame time, and source-detector/source-
+  patient distances.
+- `pt`: radiopharmaceutical, dose, half-life, and decay correction.
+
+`--profile auto` writes the union of columns for supported modalities present in
+the input. `--profile generic` writes common columns only. Repeatable
+`--dicom-tag` columns are appended after the profile columns.
 
 ### Common Options
 
@@ -130,6 +174,12 @@ uv tool install --editable . --force
 dicom-organizer --input /path/to/dicom-root --force-read --if-exists skip
 ```
 
+インストール済みバージョンを確認します。
+
+```bash
+dicom-organizer --version
+```
+
 dry-runは必須ではありませんが、新しい入力フォルダや出力テンプレートを使う前に、
 書き込みなしで確認したい場合に便利です。
 
@@ -168,6 +218,41 @@ organized/organize_summary.json
 対象にしています。プレゼンテーションステートやベンダー独自の補助オブジェクトも
 フォルダ整理はされますが、パラメータ表からは除外されます。
 
+実行サマリには、整理されたDICOMファイル総数と、CSVパラメータ表の対象になった
+ファイル数が分かれて表示されます。
+
+```text
+profile=auto
+organized_files=12
+csv_target_files=10
+csv_excluded_non_image_files=2
+```
+
+`--dry-run` ではファイルは書き込まれません。サマリには、作成予定のメタデータ
+ファイルも表示されます。
+
+### CSV列
+
+`dicom_parameters.csv` は、共通の識別子、日付、患者情報、幾何情報、メーカー情報、
+元ファイル名、ImageType、空間位置・方向の列から始まります。患者情報列は
+`--patient-mode` に従い、`keep` では `PatientName` と `PatientID` をそのまま書き、
+`hash` では `sha256:` ダイジェストを書き、`drop` では `N/A` を書きます。確認用の
+hash列はどのモードでも出力されます。
+
+profile別の列は共通列の後ろに追加されます。
+
+- `mr`: TR/TE、bandwidth、echo train length、flip angle、加算回数、磁場強度、
+  sequence系、inversion time、echo number、acquisition matrix、phase encoding、
+  sampling、SAR、coil、MR acquisition type、Siemens channel補助列。
+- `ct`: kVp、tube current、exposure time、convolution kernel、reconstruction diameter。
+- `us`: transducer、mechanical/thermal index、color data flag。
+- `xa`: kVp、tube current、exposure time、frame time、source-detector/source-patient距離。
+- `pt`: radiopharmaceutical、dose、half-life、decay correction。
+
+`--profile auto` は入力内に存在する対応モダリティの列をまとめて出力します。
+`--profile generic` は共通列だけを出力します。繰り返し指定できる `--dicom-tag`
+列はprofile列の後ろに追加されます。
+
 ### よく使うオプション
 
 患者情報をCSVに残したくない場合:
@@ -202,7 +287,7 @@ uv run python examples/synthetic_quickstart.py
 
 ```bash
 uv sync --locked
-uv run pytest
+uv run python -m pytest
 uv run ruff check
 uv build
 ```

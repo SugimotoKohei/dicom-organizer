@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +24,7 @@ from dicom_organizer.core import (
     DEFAULT_FILE_TEMPLATE,
     DEFAULT_SERIES_DIR_TEMPLATE,
     build_items,
+    print_summary,
     run,
 )
 
@@ -201,7 +203,41 @@ def test_run_dry_run_does_not_write_output(tmp_path: Path) -> None:
 
     assert result.dry_run is True
     assert result.summary["organized_files"] == 1
+    assert result.summary["profile"] == "auto"
+    assert result.summary["csv_target_files"] == 1
+    assert result.summary["csv_excluded_non_image_files"] == 0
     assert not output_root.exists()
+
+
+def test_dry_run_summary_lists_planned_metadata_outputs(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "one.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+    )
+
+    result = run(args_for(input_root, output_root, dry_run=True))
+    print_summary(
+        result.items,
+        result.stats,
+        result.output_root,
+        result.profile,
+        dry_run=result.dry_run,
+    )
+
+    output = capsys.readouterr().out
+    assert "planned_metadata_outputs:" in output
+    assert "dicom_parameters.csv" in output
+    assert "series_summary.csv" in output
+    assert "organize_summary.json" in output
 
 
 def test_default_scan_prunes_existing_organized_directory(tmp_path: Path) -> None:
@@ -540,6 +576,49 @@ def test_ct_profile_filters_to_ct_image_rows(tmp_path: Path) -> None:
         summary_rows = list(csv.DictReader(handle))
     assert len(summary_rows) == 1
     assert summary_rows[0]["Modality"] == "CT"
+
+
+def test_summary_counts_profile_csv_targets_and_non_image_exclusions(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "mr.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        modality="MR",
+    )
+    write_dicom(
+        input_root / "ct.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=2,
+        instance_number=1,
+        modality="CT",
+    )
+    write_dicom(
+        input_root / "pr.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=3,
+        instance_number=1,
+        sop_class_uid="1.2.840.10008.5.1.4.1.1.11.1",
+        modality="PR",
+    )
+
+    result = run(args_for(input_root, output_root, profile="ct"))
+
+    assert result.summary["profile"] == "ct"
+    assert result.summary["organized_files"] == 3
+    assert result.summary["csv_target_files"] == 1
+    assert result.summary["csv_excluded_non_image_files"] == 2
+    with (output_root / "organize_summary.json").open(encoding="utf-8") as handle:
+        summary = json.load(handle)
+    assert summary["profile"] == "ct"
+    assert summary["csv_target_files"] == 1
+    assert summary["csv_excluded_non_image_files"] == 2
 
 
 @pytest.mark.parametrize(
@@ -991,3 +1070,23 @@ def test_package_imports() -> None:
         text=True,
     )
     assert result.returncode == 0
+
+
+def test_cli_version_prints_package_version() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "from dicom_organizer.core import main; "
+                "sys.argv=['dicom-organizer','--version']; "
+                "raise SystemExit(main())"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip().startswith("dicom-organizer ")

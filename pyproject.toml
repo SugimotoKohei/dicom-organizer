@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dicom-organizer"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local DICOM organizer with CLI and optional PySide6 GUI"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.11,<3.12"

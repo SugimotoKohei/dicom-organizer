@@ -6,7 +6,11 @@ This project follows semantic versioning before public API stability is
 guaranteed. While the project is in `0.x`, CLI and CSV output changes may still
 occur, but they should be documented here.
 
-## 0.1.0 - Unreleased
+## 0.1.1 - Unreleased
+
+- Add post-release documentation, clearer run summaries, and CLI version output.
+
+## 0.1.0 - 2026-05-17
 
 - Package the project as `dicom-organizer`.
 - Provide the `dicom-organizer` CLI.

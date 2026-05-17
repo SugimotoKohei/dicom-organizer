@@ -49,7 +49,7 @@ from pydicom.uid import (
     XRayAngiographicImageStorage,
 )
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 
 def package_version() -> str:
@@ -936,6 +936,15 @@ def metadata_rows(rows: list[dict[str, str]], profile_name: str) -> list[dict[st
     return [row for row in rows if row_profile_name(row) == profile_name]
 
 
+def row_modality(row: dict[str, str]) -> str:
+    modality = row.get("Modality", "N/A").strip()
+    return modality or "N/A"
+
+
+def modality_counts(rows: list[dict[str, str]]) -> dict[str, int]:
+    return dict(sorted(Counter(row_modality(row) for row in rows).items()))
+
+
 def present_modality_profiles(rows: list[dict[str, str]]) -> list[ModalityProfile]:
     present_names = {
         name for name in (row_profile_name(row) for row in rows) if name in MODALITY_PROFILES
@@ -1506,6 +1515,9 @@ def write_run_summary(
         "organized_files": len(items),
         "csv_target_files": summary_counts["csv_target_files"],
         "csv_excluded_non_image_files": summary_counts["csv_excluded_non_image_files"],
+        "organized_files_by_modality": summary_counts["organized_files_by_modality"],
+        "csv_target_files_by_modality": summary_counts["csv_target_files_by_modality"],
+        "csv_excluded_files_by_modality": summary_counts["csv_excluded_files_by_modality"],
         "skipped_non_dicom": stats["skipped_non_dicom"],
         "skipped_existing": stats["skipped_existing"],
         "acquisition_dates": dict(sorted(by_date.items())),
@@ -1526,12 +1538,19 @@ def summarize_items(
 ) -> dict[str, Any]:
     by_date = Counter(item.row["AcquisitionDate"] for item in items)
     by_series = Counter(item.destination.parent.relative_to(output_root).as_posix() for item in items)
-    csv_target_files = len(metadata_rows([item.row for item in items], profile_name))
+    rows = [item.row for item in items]
+    csv_target_rows = metadata_rows(rows, profile_name)
+    csv_target_row_ids = {id(row) for row in csv_target_rows}
+    csv_excluded_rows = [row for row in rows if id(row) not in csv_target_row_ids]
+    csv_target_files = len(csv_target_rows)
     return {
         "candidate_files": stats["candidate_files"],
         "organized_files": len(items),
         "csv_target_files": csv_target_files,
         "csv_excluded_non_image_files": len(items) - csv_target_files,
+        "organized_files_by_modality": modality_counts(rows),
+        "csv_target_files_by_modality": modality_counts(csv_target_rows),
+        "csv_excluded_files_by_modality": modality_counts(csv_excluded_rows),
         "series_count": len(by_series),
         "skipped_non_dicom": stats["skipped_non_dicom"],
         "skipped_existing": stats["skipped_existing"],
@@ -1552,6 +1571,12 @@ def planned_metadata_outputs(output_root: Path, items: list[OrganizedItem]) -> l
     return outputs
 
 
+def format_counts(counts: dict[str, int]) -> str:
+    if not counts:
+        return "(none)"
+    return ",".join(f"{key}={value}" for key, value in counts.items())
+
+
 def print_summary(
     items: list[OrganizedItem],
     stats: Counter[str],
@@ -1566,6 +1591,18 @@ def print_summary(
     print(f"organized_files={summary['organized_files']}")
     print(f"csv_target_files={summary['csv_target_files']}")
     print(f"csv_excluded_non_image_files={summary['csv_excluded_non_image_files']}")
+    print(
+        "organized_files_by_modality="
+        f"{format_counts(summary['organized_files_by_modality'])}"
+    )
+    print(
+        "csv_target_files_by_modality="
+        f"{format_counts(summary['csv_target_files_by_modality'])}"
+    )
+    print(
+        "csv_excluded_files_by_modality="
+        f"{format_counts(summary['csv_excluded_files_by_modality'])}"
+    )
     print(f"series_count={summary['series_count']}")
     print(f"skipped_non_dicom={summary['skipped_non_dicom']}")
     print(f"skipped_existing={summary['skipped_existing']}")

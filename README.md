@@ -88,6 +88,9 @@ profile=auto
 organized_files=12
 csv_target_files=10
 csv_excluded_non_image_files=2
+organized_files_by_modality=CT=3,MR=7,PR=2
+csv_target_files_by_modality=CT=3,MR=7
+csv_excluded_files_by_modality=PR=2
 ```
 
 During `--dry-run`, no files are written. The summary also lists the metadata
@@ -95,28 +98,11 @@ files that would be created.
 
 ### CSV Columns
 
-`dicom_parameters.csv` always starts with common identifiers, dates, patient
-fields, geometry, manufacturer information, source filename, image type, and
-spatial orientation columns. The patient columns follow `--patient-mode`: `keep`
-writes `PatientName` and `PatientID`, `hash` writes `sha256:` digests, and `drop`
-writes `N/A`; hash helper columns are still written for checking.
-
-Profile-specific columns are appended after the common columns:
-
-- `mr`: TR/TE, bandwidth, echo train length, flip angle, averages, field
-  strength, sequence fields, inversion time, echo numbers, acquisition matrix,
-  phase encoding, sampling, SAR, coil, MR acquisition type, and Siemens channel
-  helper fields.
-- `ct`: kVp, tube current, exposure time, convolution kernel, and reconstruction
-  diameter.
-- `us`: transducer, mechanical/thermal index, and color data flag.
-- `xa`: kVp, tube current, exposure time, frame time, and source-detector/source-
-  patient distances.
-- `pt`: radiopharmaceutical, dose, half-life, and decay correction.
-
 `--profile auto` writes the union of columns for supported modalities present in
 the input. `--profile generic` writes common columns only. Repeatable
-`--dicom-tag` columns are appended after the profile columns.
+`--dicom-tag` columns are appended after the profile columns. See
+[CSV Schema](docs/csv-schema.md) for the full CSV row scope, modality-specific
+columns, `N/A` handling, and summary counts.
 
 ### Common Options
 
@@ -226,6 +212,9 @@ profile=auto
 organized_files=12
 csv_target_files=10
 csv_excluded_non_image_files=2
+organized_files_by_modality=CT=3,MR=7,PR=2
+csv_target_files_by_modality=CT=3,MR=7
+csv_excluded_files_by_modality=PR=2
 ```
 
 `--dry-run` ではファイルは書き込まれません。サマリには、作成予定のメタデータ
@@ -233,25 +222,10 @@ csv_excluded_non_image_files=2
 
 ### CSV列
 
-`dicom_parameters.csv` は、共通の識別子、日付、患者情報、幾何情報、メーカー情報、
-元ファイル名、ImageType、空間位置・方向の列から始まります。患者情報列は
-`--patient-mode` に従い、`keep` では `PatientName` と `PatientID` をそのまま書き、
-`hash` では `sha256:` ダイジェストを書き、`drop` では `N/A` を書きます。確認用の
-hash列はどのモードでも出力されます。
-
-profile別の列は共通列の後ろに追加されます。
-
-- `mr`: TR/TE、bandwidth、echo train length、flip angle、加算回数、磁場強度、
-  sequence系、inversion time、echo number、acquisition matrix、phase encoding、
-  sampling、SAR、coil、MR acquisition type、Siemens channel補助列。
-- `ct`: kVp、tube current、exposure time、convolution kernel、reconstruction diameter。
-- `us`: transducer、mechanical/thermal index、color data flag。
-- `xa`: kVp、tube current、exposure time、frame time、source-detector/source-patient距離。
-- `pt`: radiopharmaceutical、dose、half-life、decay correction。
-
 `--profile auto` は入力内に存在する対応モダリティの列をまとめて出力します。
 `--profile generic` は共通列だけを出力します。繰り返し指定できる `--dicom-tag`
-列はprofile列の後ろに追加されます。
+列はprofile列の後ろに追加されます。CSVの行単位、モダリティ別列、`N/A` の扱い、
+summary件数の詳細は [CSV Schema](docs/csv-schema.md) を参照してください。
 
 ### よく使うオプション
 

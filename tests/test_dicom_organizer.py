@@ -206,6 +206,9 @@ def test_run_dry_run_does_not_write_output(tmp_path: Path) -> None:
     assert result.summary["profile"] == "auto"
     assert result.summary["csv_target_files"] == 1
     assert result.summary["csv_excluded_non_image_files"] == 0
+    assert result.summary["organized_files_by_modality"] == {"MR": 1}
+    assert result.summary["csv_target_files_by_modality"] == {"MR": 1}
+    assert result.summary["csv_excluded_files_by_modality"] == {}
     assert not output_root.exists()
 
 
@@ -234,6 +237,9 @@ def test_dry_run_summary_lists_planned_metadata_outputs(
     )
 
     output = capsys.readouterr().out
+    assert "organized_files_by_modality=MR=1" in output
+    assert "csv_target_files_by_modality=MR=1" in output
+    assert "csv_excluded_files_by_modality=(none)" in output
     assert "planned_metadata_outputs:" in output
     assert "dicom_parameters.csv" in output
     assert "series_summary.csv" in output
@@ -481,6 +487,66 @@ def test_auto_profile_writes_mixed_modality_union_csv(tmp_path: Path) -> None:
     assert "EchoCount" in summary_fieldnames
 
 
+def test_auto_profile_writes_all_supported_modality_union_and_summary(
+    tmp_path: Path,
+) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    modalities = ("MR", "CT", "US", "XA", "PT")
+    for index, modality in enumerate(modalities, start=1):
+        write_dicom(
+            input_root / f"{modality.lower()}.dcm",
+            series_uid=generate_uid(),
+            sop_uid=generate_uid(),
+            series_number=index,
+            instance_number=1,
+            modality=modality,
+        )
+
+    run(args_for(input_root, output_root, profile="auto"))
+
+    with (output_root / "20260515" / "dicom_parameters.csv").open(
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        reader = csv.DictReader(handle)
+        rows = list(reader)
+        fieldnames = reader.fieldnames or []
+
+    assert {row["Modality"] for row in rows} == set(modalities)
+    for column in (
+        "TE_ms",
+        "KVP_kV",
+        "TransducerData",
+        "FrameTime_ms",
+        "Radiopharmaceutical",
+    ):
+        assert column in fieldnames
+    mr_row = next(row for row in rows if row["Modality"] == "MR")
+    ct_row = next(row for row in rows if row["Modality"] == "CT")
+    us_row = next(row for row in rows if row["Modality"] == "US")
+    xa_row = next(row for row in rows if row["Modality"] == "XA")
+    pt_row = next(row for row in rows if row["Modality"] == "PT")
+    assert mr_row["TE_ms"] == "10.0"
+    assert mr_row["KVP_kV"] == "N/A"
+    assert ct_row["KVP_kV"] == "120.0"
+    assert ct_row["TE_ms"] == "N/A"
+    assert us_row["TransducerData"] == "L12-5"
+    assert us_row["Radiopharmaceutical"] == "N/A"
+    assert xa_row["FrameTime_ms"] == "33.3"
+    assert xa_row["TransducerData"] == "N/A"
+    assert pt_row["Radiopharmaceutical"] == "FDG"
+    assert pt_row["FrameTime_ms"] == "N/A"
+
+    with (output_root / "organize_summary.json").open(encoding="utf-8") as handle:
+        summary = json.load(handle)
+    expected_counts = {modality: 1 for modality in modalities}
+    assert summary["organized_files_by_modality"] == expected_counts
+    assert summary["csv_target_files_by_modality"] == expected_counts
+    assert summary["csv_excluded_files_by_modality"] == {}
+
+
 def test_generic_profile_uses_common_columns_only(tmp_path: Path) -> None:
     input_root = tmp_path / "input"
     output_root = tmp_path / "organized"
@@ -578,6 +644,46 @@ def test_ct_profile_filters_to_ct_image_rows(tmp_path: Path) -> None:
     assert summary_rows[0]["Modality"] == "CT"
 
 
+def test_auto_profile_reports_non_image_modality_exclusions(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "mr.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        modality="MR",
+    )
+    write_dicom(
+        input_root / "ct.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=2,
+        instance_number=1,
+        modality="CT",
+    )
+    write_dicom(
+        input_root / "pr.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=3,
+        instance_number=1,
+        sop_class_uid="1.2.840.10008.5.1.4.1.1.11.1",
+        modality="PR",
+    )
+
+    result = run(args_for(input_root, output_root, profile="auto"))
+
+    assert result.summary["organized_files_by_modality"] == {"CT": 1, "MR": 1, "PR": 1}
+    assert result.summary["csv_target_files_by_modality"] == {"CT": 1, "MR": 1}
+    assert result.summary["csv_excluded_files_by_modality"] == {"PR": 1}
+    with (output_root / "organize_summary.json").open(encoding="utf-8") as handle:
+        summary = json.load(handle)
+    assert summary["csv_excluded_files_by_modality"] == {"PR": 1}
+
+
 def test_summary_counts_profile_csv_targets_and_non_image_exclusions(tmp_path: Path) -> None:
     input_root = tmp_path / "input"
     output_root = tmp_path / "organized"
@@ -614,11 +720,15 @@ def test_summary_counts_profile_csv_targets_and_non_image_exclusions(tmp_path: P
     assert result.summary["organized_files"] == 3
     assert result.summary["csv_target_files"] == 1
     assert result.summary["csv_excluded_non_image_files"] == 2
+    assert result.summary["organized_files_by_modality"] == {"CT": 1, "MR": 1, "PR": 1}
+    assert result.summary["csv_target_files_by_modality"] == {"CT": 1}
+    assert result.summary["csv_excluded_files_by_modality"] == {"MR": 1, "PR": 1}
     with (output_root / "organize_summary.json").open(encoding="utf-8") as handle:
         summary = json.load(handle)
     assert summary["profile"] == "ct"
     assert summary["csv_target_files"] == 1
     assert summary["csv_excluded_non_image_files"] == 2
+    assert summary["csv_excluded_files_by_modality"] == {"MR": 1, "PR": 1}
 
 
 @pytest.mark.parametrize(

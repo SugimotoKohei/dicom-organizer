@@ -6,6 +6,14 @@ This project follows semantic versioning before public API stability is
 guaranteed. While the project is in `0.x`, CLI and CSV output changes may still
 occur, but they should be documented here.
 
+## 0.1.2 - Unreleased
+
+- Add modality-level summary counts for organized, CSV-target, and CSV-excluded
+  files.
+- Add CSV schema documentation for mixed modality inputs and profile behavior.
+- Expand mixed modality regression tests for MR, CT, US, XA, PT, and non-image
+  exclusions.
+
 ## 0.1.1 - 2026-05-17
 
 - Add post-release documentation, clearer run summaries, and CLI version output.

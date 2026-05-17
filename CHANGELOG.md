@@ -6,7 +6,7 @@ This project follows semantic versioning before public API stability is
 guaranteed. While the project is in `0.x`, CLI and CSV output changes may still
 occur, but they should be documented here.
 
-## 0.1.1 - Unreleased
+## 0.1.1 - 2026-05-17
 
 - Add post-release documentation, clearer run summaries, and CLI version output.
 

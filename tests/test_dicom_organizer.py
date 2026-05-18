@@ -205,6 +205,7 @@ def test_run_dry_run_does_not_write_output(tmp_path: Path) -> None:
     assert result.summary["organized_files"] == 1
     assert result.summary["profile"] == "auto"
     assert result.summary["csv_target_files"] == 1
+    assert result.summary["csv_excluded_files"] == 0
     assert result.summary["csv_excluded_non_image_files"] == 0
     assert result.summary["organized_files_by_modality"] == {"MR": 1}
     assert result.summary["csv_target_files_by_modality"] == {"MR": 1}

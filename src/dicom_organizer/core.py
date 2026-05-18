@@ -49,7 +49,7 @@ from pydicom.uid import (
     XRayAngiographicImageStorage,
 )
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 
 def package_version() -> str:
@@ -1514,6 +1514,7 @@ def write_run_summary(
         "candidate_files": stats["candidate_files"],
         "organized_files": len(items),
         "csv_target_files": summary_counts["csv_target_files"],
+        "csv_excluded_files": summary_counts["csv_excluded_files"],
         "csv_excluded_non_image_files": summary_counts["csv_excluded_non_image_files"],
         "organized_files_by_modality": summary_counts["organized_files_by_modality"],
         "csv_target_files_by_modality": summary_counts["csv_target_files_by_modality"],
@@ -1543,11 +1544,13 @@ def summarize_items(
     csv_target_row_ids = {id(row) for row in csv_target_rows}
     csv_excluded_rows = [row for row in rows if id(row) not in csv_target_row_ids]
     csv_target_files = len(csv_target_rows)
+    csv_excluded_files = len(items) - csv_target_files
     return {
         "candidate_files": stats["candidate_files"],
         "organized_files": len(items),
         "csv_target_files": csv_target_files,
-        "csv_excluded_non_image_files": len(items) - csv_target_files,
+        "csv_excluded_files": csv_excluded_files,
+        "csv_excluded_non_image_files": csv_excluded_files,
         "organized_files_by_modality": modality_counts(rows),
         "csv_target_files_by_modality": modality_counts(csv_target_rows),
         "csv_excluded_files_by_modality": modality_counts(csv_excluded_rows),

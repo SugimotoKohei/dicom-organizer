@@ -6,6 +6,18 @@ This project follows semantic versioning before public API stability is
 guaranteed. While the project is in `0.x`, CLI and CSV output changes may still
 occur, but they should be documented here.
 
+## 0.1.3 - Unreleased
+
+- Improve the PySide6 GUI with a persistent summary panel, clearer dry-run
+  status, modality count formatting, and shorter error messages with full
+  details kept in the log.
+- Add visible GUI warnings for `patient-mode=keep`, `action=move`, and
+  `if-exists=overwrite`.
+- Collapse advanced GUI options by default so routine runs focus on paths,
+  profile, action, and patient metadata handling.
+- Add GUI regression tests for the initial safety guidance and dry-run summary
+  display.
+
 ## 0.1.2 - 2026-05-19
 
 - Add modality-level summary counts for organized, CSV-target, and CSV-excluded

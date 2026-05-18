@@ -83,6 +83,8 @@ else:
     PYSIDE_IMPORT_ERROR = None
 
 
+EMPTY_VALUE = "N/A"
+
 PREVIEW_COLUMNS = [
     "AcquisitionDate",
     "SeriesNumber",
@@ -96,6 +98,20 @@ PREVIEW_COLUMNS = [
     "Manufacturer",
     "ManufacturerModelName",
 ]
+
+
+def _format_modality_counts(counts: dict[str, int]) -> str:
+    if not counts:
+        return "None"
+    return " / ".join(f"{modality or EMPTY_VALUE} {count}" for modality, count in sorted(counts.items()))
+
+
+def _short_error_message(details: str) -> str:
+    for line in reversed(details.splitlines()):
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return "Failed"
 
 
 class Worker(QObject):
@@ -150,19 +166,53 @@ class MainWindow(QMainWindow):
         self.file_template_edit = QLineEdit(DEFAULT_FILE_TEMPLATE)
         self.limit_edit = QLineEdit("0")
 
+        self.status_label = QLabel("Ready. Use Dry Run to preview without writing files.")
+        self.status_label.setWordWrap(True)
+        self.patient_warning_label = QLabel()
+        self.patient_warning_label.setWordWrap(True)
+        self.patient_warning_label.setStyleSheet(
+            "QLabel { color: #7a4b00; background: #fff4d6; padding: 6px; "
+            "border: 1px solid #f0c36d; }"
+        )
+        self.unsafe_action_label = QLabel()
+        self.unsafe_action_label.setWordWrap(True)
+        self.unsafe_action_label.setStyleSheet(
+            "QLabel { color: #7a1f1f; background: #fde7e7; padding: 6px; "
+            "border: 1px solid #e08b8b; }"
+        )
+        self.summary_labels: dict[str, QLabel] = {
+            "profile": QLabel("-"),
+            "organized_files": QLabel("-"),
+            "csv_target_files": QLabel("-"),
+            "csv_excluded_files": QLabel("-"),
+            "series_count": QLabel("-"),
+            "organized_by_modality": QLabel("-"),
+            "csv_target_by_modality": QLabel("-"),
+            "csv_excluded_by_modality": QLabel("-"),
+        }
+        for label in self.summary_labels.values():
+            label.setWordWrap(True)
+
         self.dry_run_button = QPushButton("Dry Run")
+        self.dry_run_button.setFixedWidth(92)
         self.run_button = QPushButton("Run")
+        self.run_button.setFixedWidth(80)
         self.open_output_button = QPushButton("Open Output")
+        self.open_output_button.setFixedWidth(120)
         self.open_output_button.setEnabled(False)
         self.progress = QProgressBar()
         self.progress.setRange(0, 1)
         self.progress.setValue(0)
         self.progress.setTextVisible(False)
+        self.progress.setFixedWidth(140)
+        self.progress.setVisible(False)
 
         self.table = QTableWidget(0, len(PREVIEW_COLUMNS))
         self.table.setHorizontalHeaderLabels(PREVIEW_COLUMNS)
         self.table.setSortingEnabled(True)
         self.table.setAlternatingRowColors(True)
+        for index, column in enumerate(PREVIEW_COLUMNS):
+            self.table.setColumnWidth(index, max(90, len(column) * 8))
 
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -170,6 +220,9 @@ class MainWindow(QMainWindow):
 
         self._build_layout()
         self._connect_signals()
+        self._update_patient_warning()
+        self._update_unsafe_action_warning()
+        self._set_advanced_visible(False)
 
     def _build_layout(self) -> None:
         root = QWidget()
@@ -194,25 +247,55 @@ class MainWindow(QMainWindow):
         options_layout.addRow("If exists", self.exists_combo)
         options_layout.addRow("Profile", self.profile_combo)
         options_layout.addRow("Patient mode", self.patient_combo)
-        options_layout.addRow("Series dir template", self.series_template_edit)
-        options_layout.addRow("File template", self.file_template_edit)
-        options_layout.addRow("Limit", self.limit_edit)
+
+        self.advanced_group = QGroupBox("Advanced Options")
+        self.advanced_group.setCheckable(True)
+        self.advanced_group.setChecked(False)
+        advanced_layout = QFormLayout(self.advanced_group)
+        self.series_template_label = QLabel("Series dir template")
+        self.file_template_label = QLabel("File template")
+        self.limit_label = QLabel("Limit")
+        advanced_layout.addRow(self.series_template_label, self.series_template_edit)
+        advanced_layout.addRow(self.file_template_label, self.file_template_edit)
+        advanced_layout.addRow(self.limit_label, self.limit_edit)
         checks = QHBoxLayout()
         checks.addWidget(self.force_read_check)
         checks.addWidget(self.include_hidden_check)
         checks.addWidget(self.include_organized_check)
         checks.addStretch()
-        options_layout.addRow("Read options", checks)
+        self.advanced_checks_label = QLabel("Read options")
+        self.advanced_checks_widget = QWidget()
+        self.advanced_checks_widget.setLayout(checks)
+        advanced_layout.addRow(self.advanced_checks_label, self.advanced_checks_widget)
+
+        summary_group = QGroupBox("Summary")
+        summary_layout = QFormLayout(summary_group)
+        summary_layout.addRow("Profile", self.summary_labels["profile"])
+        summary_layout.addRow("Organized files", self.summary_labels["organized_files"])
+        summary_layout.addRow("CSV target files", self.summary_labels["csv_target_files"])
+        summary_layout.addRow("CSV excluded files", self.summary_labels["csv_excluded_files"])
+        summary_layout.addRow("Series", self.summary_labels["series_count"])
+        summary_layout.addRow("Organized by modality", self.summary_labels["organized_by_modality"])
+        summary_layout.addRow("CSV targets by modality", self.summary_labels["csv_target_by_modality"])
+        summary_layout.addRow(
+            "CSV excluded by modality", self.summary_labels["csv_excluded_by_modality"]
+        )
 
         button_row = QHBoxLayout()
         button_row.addWidget(self.dry_run_button)
         button_row.addWidget(self.run_button)
         button_row.addWidget(self.open_output_button)
         button_row.addWidget(self.progress)
+        button_row.addStretch()
 
         layout.addWidget(paths_group)
         layout.addWidget(options_group)
+        layout.addWidget(self.patient_warning_label)
+        layout.addWidget(self.unsafe_action_label)
+        layout.addWidget(self.advanced_group)
         layout.addLayout(button_row)
+        layout.addWidget(self.status_label)
+        layout.addWidget(summary_group)
         layout.addWidget(QLabel("Series preview"))
         layout.addWidget(self.table, stretch=2)
         layout.addWidget(QLabel("Log"))
@@ -223,6 +306,47 @@ class MainWindow(QMainWindow):
         self.dry_run_button.clicked.connect(self._start_dry_run)
         self.run_button.clicked.connect(self._start_run)
         self.open_output_button.clicked.connect(self._open_output)
+        self.patient_combo.currentTextChanged.connect(self._update_patient_warning)
+        self.action_combo.currentTextChanged.connect(self._update_unsafe_action_warning)
+        self.exists_combo.currentTextChanged.connect(self._update_unsafe_action_warning)
+        self.advanced_group.toggled.connect(self._set_advanced_visible)
+
+    def _set_advanced_visible(self, visible: bool) -> None:
+        for widget in (
+            self.series_template_edit,
+            self.file_template_edit,
+            self.limit_edit,
+            self.series_template_label,
+            self.file_template_label,
+            self.limit_label,
+            self.force_read_check,
+            self.include_hidden_check,
+            self.include_organized_check,
+            self.advanced_checks_label,
+            self.advanced_checks_widget,
+        ):
+            widget.setVisible(visible)
+
+    def _update_patient_warning(self) -> None:
+        if self.patient_combo.currentText() == "keep":
+            self.patient_warning_label.setText(
+                "Patient mode is keep. PatientName and PatientID may be written to CSV metadata."
+            )
+            self.patient_warning_label.setVisible(True)
+        else:
+            self.patient_warning_label.setVisible(False)
+
+    def _update_unsafe_action_warning(self) -> None:
+        risky_parts = []
+        if self.action_combo.currentText() == "move":
+            risky_parts.append("move will relocate source DICOM files")
+        if self.exists_combo.currentText() == "overwrite":
+            risky_parts.append("overwrite can replace existing output files")
+        if risky_parts:
+            self.unsafe_action_label.setText("Warning: " + "; ".join(risky_parts) + ".")
+            self.unsafe_action_label.setVisible(True)
+        else:
+            self.unsafe_action_label.setVisible(False)
 
     def _choose_input(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Input folder")
@@ -292,6 +416,12 @@ class MainWindow(QMainWindow):
     def _start_worker(self, args: argparse.Namespace, dry_run_only: bool) -> None:
         self._set_busy(True)
         self.table.setRowCount(0)
+        self._reset_summary()
+        self.status_label.setText(
+            "Dry run running. No files will be written."
+            if dry_run_only
+            else "Run running. Output files may be written."
+        )
         self.log.appendPlainText(
             f"{'Dry run' if dry_run_only else 'Run'} started: input={args.input}"
         )
@@ -311,36 +441,73 @@ class MainWindow(QMainWindow):
         items: list[OrganizedItem] = payload["items"]
         stats: Counter[str] = payload["stats"]
         output_root: Path = payload["output_root"]
+        dry_run: bool = payload["dry_run"]
         profile: str = payload["profile"]
         summary: dict[str, Any] = payload["summary"]
         self.last_output_root = output_root
         self.open_output_button.setEnabled(output_root.exists())
         self._fill_table(items, profile)
+        self._update_summary(summary)
+        self.status_label.setText(
+            f"Dry run completed. No files were written. Planned output: {output_root}"
+            if dry_run
+            else f"Run completed. Output: {output_root}"
+        )
         self.log.appendPlainText(
-            "Completed: "
-            f"profile={summary['profile']}, "
-            f"organized_files={summary['organized_files']}, "
-            f"csv_target_files={summary['csv_target_files']}, "
-            f"csv_excluded_non_image_files={summary['csv_excluded_non_image_files']}, "
-            f"organized_by_modality={summary['organized_files_by_modality']}, "
-            f"csv_target_by_modality={summary['csv_target_files_by_modality']}, "
-            f"csv_excluded_by_modality={summary['csv_excluded_files_by_modality']}, "
-            f"series_count={summary['series_count']}, "
-            f"skipped_non_dicom={stats['skipped_non_dicom']}, "
-            f"skipped_existing={stats['skipped_existing']}, "
-            f"output={output_root}"
+            "\n".join(
+                [
+                    "Completed:",
+                    f"  profile: {summary['profile']}",
+                    f"  organized files: {summary['organized_files']}",
+                    f"  CSV target files: {summary['csv_target_files']}",
+                    f"  CSV excluded files: {summary['csv_excluded_files']}",
+                    "  organized by modality: "
+                    f"{_format_modality_counts(summary['organized_files_by_modality'])}",
+                    "  CSV targets by modality: "
+                    f"{_format_modality_counts(summary['csv_target_files_by_modality'])}",
+                    "  CSV excluded by modality: "
+                    f"{_format_modality_counts(summary['csv_excluded_files_by_modality'])}",
+                    f"  series count: {summary['series_count']}",
+                    f"  skipped non-DICOM: {stats['skipped_non_dicom']}",
+                    f"  skipped existing: {stats['skipped_existing']}",
+                    f"  output: {output_root}",
+                ]
+            )
         )
         if not items:
             QMessageBox.information(self, "No DICOM files", "整理対象のDICOMが見つかりませんでした。")
 
     def _worker_failed(self, details: str) -> None:
         self._set_busy(False)
-        self.log.appendPlainText(details)
-        QMessageBox.critical(self, "Failed", details.splitlines()[-1] if details else "Failed")
+        message = _short_error_message(details)
+        self.status_label.setText(f"Failed: {message}")
+        self.log.appendPlainText("Failed:\n" + details)
+        QMessageBox.critical(self, "Failed", message)
+
+    def _reset_summary(self) -> None:
+        for label in self.summary_labels.values():
+            label.setText("-")
+
+    def _update_summary(self, summary: dict[str, Any]) -> None:
+        self.summary_labels["profile"].setText(str(summary["profile"]))
+        self.summary_labels["organized_files"].setText(str(summary["organized_files"]))
+        self.summary_labels["csv_target_files"].setText(str(summary["csv_target_files"]))
+        self.summary_labels["csv_excluded_files"].setText(str(summary["csv_excluded_files"]))
+        self.summary_labels["series_count"].setText(str(summary["series_count"]))
+        self.summary_labels["organized_by_modality"].setText(
+            _format_modality_counts(summary["organized_files_by_modality"])
+        )
+        self.summary_labels["csv_target_by_modality"].setText(
+            _format_modality_counts(summary["csv_target_files_by_modality"])
+        )
+        self.summary_labels["csv_excluded_by_modality"].setText(
+            _format_modality_counts(summary["csv_excluded_files_by_modality"])
+        )
 
     def _set_busy(self, busy: bool) -> None:
         self.dry_run_button.setEnabled(not busy)
         self.run_button.setEnabled(not busy)
+        self.progress.setVisible(busy)
         self.progress.setRange(0, 0 if busy else 1)
         self.progress.setValue(0)
 

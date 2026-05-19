@@ -263,7 +263,7 @@ class OrganizeOptions:
     confirm_move: bool = False
     if_exists: str = "error"
     dry_run: bool = False
-    force_read: bool = False
+    force_read: bool = True
     include_hidden: bool = False
     include_organized: bool = False
     limit: int = 0
@@ -407,8 +407,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "-f",
         "--force-read",
+        dest="force_read",
         action="store_true",
-        help="Pass force=True to pydicom.dcmread for non-standard files.",
+        default=True,
+        help="Read DICOM headers with pydicom force=True. Default: enabled.",
+    )
+    parser.add_argument(
+        "--no-force-read",
+        dest="force_read",
+        action="store_false",
+        help="Disable pydicom force=True and require standard DICOM headers.",
     )
     parser.add_argument(
         "--include-hidden",
@@ -512,7 +520,7 @@ def normalize_options(
             confirm_move=bool(getattr(args, "confirm_move", False)),
             if_exists=str(getattr(args, "if_exists", "error")),
             dry_run=bool(getattr(args, "dry_run", False) if dry_run is None else dry_run),
-            force_read=bool(getattr(args, "force_read", False)),
+            force_read=bool(getattr(args, "force_read", True)),
             include_hidden=bool(getattr(args, "include_hidden", False)),
             include_organized=bool(getattr(args, "include_organized", False)),
             limit=int(getattr(args, "limit", 0) or 0),

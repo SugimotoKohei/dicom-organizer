@@ -160,6 +160,7 @@ class MainWindow(QMainWindow):
         self.patient_combo = QComboBox()
         self.patient_combo.addItems(["keep", "hash", "drop"])
         self.force_read_check = QCheckBox("force-read")
+        self.force_read_check.setChecked(True)
         self.include_hidden_check = QCheckBox("include-hidden")
         self.include_organized_check = QCheckBox("include-organized")
         self.series_template_edit = QLineEdit(DEFAULT_SERIES_DIR_TEMPLATE)

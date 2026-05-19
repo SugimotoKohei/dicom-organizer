@@ -150,7 +150,7 @@ def args_for(input_root: Path, output_root: Path, **overrides: object) -> argpar
         "confirm_move": False,
         "if_exists": "error",
         "dry_run": False,
-        "force_read": False,
+        "force_read": True,
         "include_hidden": False,
         "include_organized": False,
         "limit": 0,
@@ -1189,6 +1189,13 @@ def test_cli_accepts_positional_input(tmp_path: Path) -> None:
 
     assert args.input == tmp_path
     assert args.dry_run is True
+    assert args.force_read is True
+
+
+def test_cli_can_disable_default_force_read(tmp_path: Path) -> None:
+    args = parse_args([str(tmp_path), "--no-force-read"])
+
+    assert args.force_read is False
 
 
 def test_cli_keeps_input_option_for_compatibility(tmp_path: Path) -> None:

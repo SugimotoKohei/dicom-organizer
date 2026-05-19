@@ -60,6 +60,7 @@ dev = [
 [project.scripts]
 dicom-organizer = "dicom_organizer.cli:main"
 dicom-organizer-gui = "dicom_organizer.gui:main"
+dicom-organizer-gui-app = "dicom_organizer.macos_app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

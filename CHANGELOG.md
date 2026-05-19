@@ -15,8 +15,10 @@ occur, but they should be documented here.
   `if-exists=overwrite`.
 - Collapse advanced GUI options by default so routine runs focus on paths,
   profile, action, and patient metadata handling.
+- Add `dicom-organizer-gui-app` to create a lightweight macOS `.app` launcher
+  for the installed GUI.
 - Add GUI regression tests for the initial safety guidance and dry-run summary
-  display.
+  display, plus launcher bundle generation tests.
 
 ## 0.1.2 - 2026-05-19
 

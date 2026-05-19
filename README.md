@@ -126,6 +126,18 @@ uv tool install 'dicom-organizer[gui]'
 dicom-organizer-gui
 ```
 
+On macOS, create a lightweight `.app` launcher for the installed GUI:
+
+```bash
+dicom-organizer-gui-app
+open ~/Applications/dicom-organizer.app
+```
+
+The launcher uses the Python environment where `dicom-organizer[gui]` is
+installed, so keep that tool installation in place. Re-run
+`dicom-organizer-gui-app --force` after upgrading if you want to refresh the
+launcher metadata.
+
 Try it without real DICOM data:
 
 ```bash
@@ -248,6 +260,17 @@ GUIを使う場合:
 uv tool install 'dicom-organizer[gui]'
 dicom-organizer-gui
 ```
+
+macOSでは、インストール済みGUI用の軽量 `.app` launcherを作成できます。
+
+```bash
+dicom-organizer-gui-app
+open ~/Applications/dicom-organizer.app
+```
+
+このlauncherは `dicom-organizer[gui]` をインストールしたPython環境を使います。
+そのため、作成後もuv toolのインストール環境は残してください。アップグレード後に
+launcherのメタデータを更新したい場合は `dicom-organizer-gui-app --force` を再実行します。
 
 実DICOMなしで試す場合:
 

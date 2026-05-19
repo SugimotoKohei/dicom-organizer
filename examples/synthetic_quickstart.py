@@ -65,7 +65,6 @@ def main() -> int:
 
         command = [
             "dicom-organizer",
-            "--input",
             str(input_root),
             "--patient-mode",
             "drop",

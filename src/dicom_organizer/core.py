@@ -49,7 +49,7 @@ from pydicom.uid import (
     XRayAngiographicImageStorage,
 )
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 
 def package_version() -> str:
@@ -352,7 +352,7 @@ class OrganizeResult:
         return summarize_items(self.items, self.stats, self.output_root, self.profile)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Organize DICOM files by AcquisitionDate and SeriesInstanceUID."
     )
@@ -362,10 +362,17 @@ def parse_args() -> argparse.Namespace:
         version=f"%(prog)s {package_version()}",
     )
     parser.add_argument(
-        "--input",
-        required=True,
+        "input_path",
+        nargs="?",
         type=Path,
+        metavar="INPUT",
         help="Input directory containing DICOM files.",
+    )
+    parser.add_argument(
+        "--input",
+        dest="input",
+        type=Path,
+        help="Input directory containing DICOM files. Kept for compatibility; positional INPUT is preferred.",
     )
     parser.add_argument(
         "--output",
@@ -465,7 +472,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print skipped files and per-series output while running.",
     )
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.input is None and args.input_path is None:
+        parser.error("the following arguments are required: INPUT (or --input)")
+    if args.input is not None and args.input_path is not None:
+        parser.error("specify the input directory either as INPUT or --input, not both")
+    args.input = args.input if args.input is not None else args.input_path
+    return args
 
 
 def normalize_options(

@@ -30,7 +30,7 @@ uv tool install --editable . --force
 Run the organizer:
 
 ```bash
-dicom-organizer --input /path/to/dicom-root --force-read --if-exists skip
+dicom-organizer /path/to/dicom-root --force-read --if-exists skip
 ```
 
 Check the installed version:
@@ -43,10 +43,12 @@ A dry run is optional, but useful when checking a new input folder or output
 template before writing files:
 
 ```bash
-dicom-organizer --input /path/to/dicom-root --dry-run --force-read --if-exists skip
+dicom-organizer /path/to/dicom-root --dry-run --force-read --if-exists skip
 ```
 
-By default, files are copied to `<input>/organized/`. Source files are not removed.
+`--input /path/to/dicom-root` is still accepted for compatibility, but the
+positional input path is preferred. By default, files are copied to
+`<input>/organized/`. Source files are not removed.
 The default metadata profile is `auto`, which writes a single
 `dicom_parameters.csv` for supported image modalities (`MR`, `CT`, `US`, `XA`,
 `PT`) and expands columns based on the modalities actually present. Use
@@ -54,8 +56,8 @@ The default metadata profile is `auto`, which writes a single
 focus the CSVs on one modality.
 
 ```bash
-dicom-organizer --input /path/to/dicom-root --profile generic
-dicom-organizer --input /path/to/dicom-root --profile ct
+dicom-organizer /path/to/dicom-root --profile generic
+dicom-organizer /path/to/dicom-root --profile ct
 ```
 
 The default series folder name uses a normalized series label: usually `ProtocolName`,
@@ -109,14 +111,14 @@ columns, `N/A` handling, and summary counts.
 Avoid writing patient identifiers to CSV:
 
 ```bash
-dicom-organizer --input /path/to/dicom-root --patient-mode hash
-dicom-organizer --input /path/to/dicom-root --patient-mode drop
+dicom-organizer /path/to/dicom-root --patient-mode hash
+dicom-organizer /path/to/dicom-root --patient-mode drop
 ```
 
 Add extra DICOM tags to the CSV:
 
 ```bash
-dicom-organizer --input /path/to/dicom-root --dicom-tag EchoTime --dicom-tag InPlanePhaseEncodingDirection
+dicom-organizer /path/to/dicom-root --dicom-tag EchoTime --dicom-tag InPlanePhaseEncodingDirection
 ```
 
 Use the optional GUI:
@@ -169,7 +171,7 @@ uv tool install --editable . --force
 整理を実行します。
 
 ```bash
-dicom-organizer --input /path/to/dicom-root --force-read --if-exists skip
+dicom-organizer /path/to/dicom-root --force-read --if-exists skip
 ```
 
 インストール済みバージョンを確認します。
@@ -182,18 +184,19 @@ dry-runは必須ではありませんが、新しい入力フォルダや出力�
 書き込みなしで確認したい場合に便利です。
 
 ```bash
-dicom-organizer --input /path/to/dicom-root --dry-run --force-read --if-exists skip
+dicom-organizer /path/to/dicom-root --dry-run --force-read --if-exists skip
 ```
 
-既定では `<input>/organized/` にコピーされます。元ファイルは消えません。
+互換性のため `--input /path/to/dicom-root` も引き続き使えますが、通常は位置引数の
+入力パスを推奨します。既定では `<input>/organized/` にコピーされます。元ファイルは消えません。
 既定の metadata profile は `auto` で、対応している画像モダリティ（`MR`, `CT`,
 `US`, `XA`, `PT`）を 1 つの `dicom_parameters.csv` にまとめ、実際に含まれる
 モダリティに応じて列を広げます。共通列だけ欲しい場合は `--profile generic`、
 単一モダリティに絞りたい場合は `--profile mr|ct|us|xa|pt` を使います。
 
 ```bash
-dicom-organizer --input /path/to/dicom-root --profile generic
-dicom-organizer --input /path/to/dicom-root --profile ct
+dicom-organizer /path/to/dicom-root --profile generic
+dicom-organizer /path/to/dicom-root --profile ct
 ```
 
 シリーズフォルダ名の既定値は正規化した series label で、通常は `ProtocolName`、
@@ -244,14 +247,14 @@ summary件数の詳細は [CSV Schema](docs/csv-schema.md) を参照してくだ
 患者情報をCSVに残したくない場合:
 
 ```bash
-dicom-organizer --input /path/to/dicom-root --patient-mode hash
-dicom-organizer --input /path/to/dicom-root --patient-mode drop
+dicom-organizer /path/to/dicom-root --patient-mode hash
+dicom-organizer /path/to/dicom-root --patient-mode drop
 ```
 
 任意のDICOMタグをCSVに追加する場合:
 
 ```bash
-dicom-organizer --input /path/to/dicom-root --dicom-tag EchoTime --dicom-tag InPlanePhaseEncodingDirection
+dicom-organizer /path/to/dicom-root --dicom-tag EchoTime --dicom-tag InPlanePhaseEncodingDirection
 ```
 
 GUIを使う場合:

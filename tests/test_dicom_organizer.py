@@ -24,6 +24,7 @@ from dicom_organizer.core import (
     DEFAULT_FILE_TEMPLATE,
     DEFAULT_SERIES_DIR_TEMPLATE,
     build_items,
+    parse_args,
     print_summary,
     run,
 )
@@ -1181,6 +1182,25 @@ def test_package_imports() -> None:
         text=True,
     )
     assert result.returncode == 0
+
+
+def test_cli_accepts_positional_input(tmp_path: Path) -> None:
+    args = parse_args([str(tmp_path), "--dry-run"])
+
+    assert args.input == tmp_path
+    assert args.dry_run is True
+
+
+def test_cli_keeps_input_option_for_compatibility(tmp_path: Path) -> None:
+    args = parse_args(["--input", str(tmp_path), "--dry-run"])
+
+    assert args.input == tmp_path
+    assert args.dry_run is True
+
+
+def test_cli_rejects_duplicate_input_forms(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit):
+        parse_args([str(tmp_path), "--input", str(tmp_path)])
 
 
 def test_cli_version_prints_package_version() -> None:

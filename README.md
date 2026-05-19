@@ -46,8 +46,8 @@ template before writing files:
 dicom-organizer /path/to/dicom-root --dry-run --force-read --if-exists skip
 ```
 
-`--input /path/to/dicom-root` is still accepted for compatibility, but the
-positional input path is preferred. By default, files are copied to
+`-i /path/to/dicom-root` and `--input /path/to/dicom-root` are still accepted
+for compatibility, but the positional input path is preferred. By default, files are copied to
 `<input>/organized/`. Source files are not removed.
 The default metadata profile is `auto`, which writes a single
 `dicom_parameters.csv` for supported image modalities (`MR`, `CT`, `US`, `XA`,
@@ -187,8 +187,9 @@ dry-runは必須ではありませんが、新しい入力フォルダや出力�
 dicom-organizer /path/to/dicom-root --dry-run --force-read --if-exists skip
 ```
 
-互換性のため `--input /path/to/dicom-root` も引き続き使えますが、通常は位置引数の
-入力パスを推奨します。既定では `<input>/organized/` にコピーされます。元ファイルは消えません。
+互換性のため `-i /path/to/dicom-root` と `--input /path/to/dicom-root` も
+引き続き使えますが、通常は位置引数の入力パスを推奨します。
+既定では `<input>/organized/` にコピーされます。元ファイルは消えません。
 既定の metadata profile は `auto` で、対応している画像モダリティ（`MR`, `CT`,
 `US`, `XA`, `PT`）を 1 つの `dicom_parameters.csv` にまとめ、実際に含まれる
 モダリティに応じて列を広げます。共通列だけ欲しい場合は `--profile generic`、

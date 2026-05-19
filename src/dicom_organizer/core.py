@@ -369,6 +369,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Input directory containing DICOM files.",
     )
     parser.add_argument(
+        "-i",
         "--input",
         dest="input",
         type=Path,

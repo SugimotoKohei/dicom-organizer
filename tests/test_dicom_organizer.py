@@ -1198,6 +1198,13 @@ def test_cli_keeps_input_option_for_compatibility(tmp_path: Path) -> None:
     assert args.dry_run is True
 
 
+def test_cli_accepts_short_input_option(tmp_path: Path) -> None:
+    args = parse_args(["-i", str(tmp_path), "--dry-run"])
+
+    assert args.input == tmp_path
+    assert args.dry_run is True
+
+
 def test_cli_rejects_duplicate_input_forms(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         parse_args([str(tmp_path), "--input", str(tmp_path)])

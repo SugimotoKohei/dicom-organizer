@@ -6,7 +6,7 @@ This project follows semantic versioning before public API stability is
 guaranteed. While the project is in `0.x`, CLI and CSV output changes may still
 occur, but they should be documented here.
 
-## 0.1.3 - Unreleased
+## 0.1.3 - 2026-05-20
 
 - Improve the PySide6 GUI with a persistent summary panel, clearer dry-run
   status, modality count formatting, and shorter error messages with full

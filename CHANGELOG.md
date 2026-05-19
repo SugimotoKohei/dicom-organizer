@@ -10,6 +10,8 @@ occur, but they should be documented here.
 
 - Allow the input directory to be passed as a positional argument, while keeping
   `-i` and `--input` for compatibility.
+- Add common short CLI options for output, profile, dry-run, force-read, limit,
+  custom DICOM tags, and verbose output.
 - Update CLI examples to prefer `dicom-organizer /path/to/dicom-root`.
 
 ## 0.1.3 - 2026-05-20

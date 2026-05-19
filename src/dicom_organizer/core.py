@@ -376,6 +376,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Input directory containing DICOM files. Kept for compatibility; positional INPUT is preferred.",
     )
     parser.add_argument(
+        "-o",
         "--output",
         type=Path,
         help="Output directory. Defaults to <input>/organized.",
@@ -398,11 +399,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Behavior when the target file already exists. Default: error.",
     )
     parser.add_argument(
+        "-n",
         "--dry-run",
         action="store_true",
         help="Scan and summarize without writing output files.",
     )
     parser.add_argument(
+        "-f",
         "--force-read",
         action="store_true",
         help="Pass force=True to pydicom.dcmread for non-standard files.",
@@ -418,6 +421,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Do not skip directories named organized.",
     )
     parser.add_argument(
+        "-l",
         "--limit",
         type=int,
         default=0,
@@ -441,6 +445,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "-p",
         "--profile",
         choices=PROFILE_NAMES,
         default="auto",
@@ -457,6 +462,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="How to write PatientName in metadata CSV. Default keeps the old behavior.",
     )
     parser.add_argument(
+        "-t",
         "--dicom-tag",
         "--tag",
         action="append",
@@ -469,6 +475,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "-v",
         "--verbose",
         action="store_true",
         help="Print skipped files and per-series output while running.",

@@ -1205,6 +1205,34 @@ def test_cli_accepts_short_input_option(tmp_path: Path) -> None:
     assert args.dry_run is True
 
 
+def test_cli_accepts_common_short_options(tmp_path: Path) -> None:
+    output_root = tmp_path / "organized"
+    args = parse_args(
+        [
+            str(tmp_path),
+            "-o",
+            str(output_root),
+            "-n",
+            "-f",
+            "-l",
+            "3",
+            "-p",
+            "ct",
+            "-t",
+            "EchoTime",
+            "-v",
+        ]
+    )
+
+    assert args.output == output_root
+    assert args.dry_run is True
+    assert args.force_read is True
+    assert args.limit == 3
+    assert args.profile == "ct"
+    assert args.dicom_tag == ["EchoTime"]
+    assert args.verbose is True
+
+
 def test_cli_rejects_duplicate_input_forms(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         parse_args([str(tmp_path), "--input", str(tmp_path)])

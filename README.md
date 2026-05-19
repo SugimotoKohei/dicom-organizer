@@ -30,7 +30,7 @@ uv tool install --editable . --force
 Run the organizer:
 
 ```bash
-dicom-organizer /path/to/dicom-root --force-read --if-exists skip
+dicom-organizer /path/to/dicom-root -f --if-exists skip
 ```
 
 Check the installed version:
@@ -43,7 +43,7 @@ A dry run is optional, but useful when checking a new input folder or output
 template before writing files:
 
 ```bash
-dicom-organizer /path/to/dicom-root --dry-run --force-read --if-exists skip
+dicom-organizer /path/to/dicom-root -n -f --if-exists skip
 ```
 
 `-i /path/to/dicom-root` and `--input /path/to/dicom-root` are still accepted
@@ -56,8 +56,8 @@ The default metadata profile is `auto`, which writes a single
 focus the CSVs on one modality.
 
 ```bash
-dicom-organizer /path/to/dicom-root --profile generic
-dicom-organizer /path/to/dicom-root --profile ct
+dicom-organizer /path/to/dicom-root -p generic
+dicom-organizer /path/to/dicom-root -p ct
 ```
 
 The default series folder name uses a normalized series label: usually `ProtocolName`,
@@ -118,8 +118,12 @@ dicom-organizer /path/to/dicom-root --patient-mode drop
 Add extra DICOM tags to the CSV:
 
 ```bash
-dicom-organizer /path/to/dicom-root --dicom-tag EchoTime --dicom-tag InPlanePhaseEncodingDirection
+dicom-organizer /path/to/dicom-root -t EchoTime -t InPlanePhaseEncodingDirection
 ```
+
+Common short options are also available: `-i/--input`, `-o/--output`,
+`-p/--profile`, `-n/--dry-run`, `-f/--force-read`, `-l/--limit`,
+`-t/--dicom-tag`, and `-v/--verbose`.
 
 Use the optional GUI:
 
@@ -171,7 +175,7 @@ uv tool install --editable . --force
 整理を実行します。
 
 ```bash
-dicom-organizer /path/to/dicom-root --force-read --if-exists skip
+dicom-organizer /path/to/dicom-root -f --if-exists skip
 ```
 
 インストール済みバージョンを確認します。
@@ -184,7 +188,7 @@ dry-runは必須ではありませんが、新しい入力フォルダや出力�
 書き込みなしで確認したい場合に便利です。
 
 ```bash
-dicom-organizer /path/to/dicom-root --dry-run --force-read --if-exists skip
+dicom-organizer /path/to/dicom-root -n -f --if-exists skip
 ```
 
 互換性のため `-i /path/to/dicom-root` と `--input /path/to/dicom-root` も
@@ -196,8 +200,8 @@ dicom-organizer /path/to/dicom-root --dry-run --force-read --if-exists skip
 単一モダリティに絞りたい場合は `--profile mr|ct|us|xa|pt` を使います。
 
 ```bash
-dicom-organizer /path/to/dicom-root --profile generic
-dicom-organizer /path/to/dicom-root --profile ct
+dicom-organizer /path/to/dicom-root -p generic
+dicom-organizer /path/to/dicom-root -p ct
 ```
 
 シリーズフォルダ名の既定値は正規化した series label で、通常は `ProtocolName`、
@@ -255,8 +259,12 @@ dicom-organizer /path/to/dicom-root --patient-mode drop
 任意のDICOMタグをCSVに追加する場合:
 
 ```bash
-dicom-organizer /path/to/dicom-root --dicom-tag EchoTime --dicom-tag InPlanePhaseEncodingDirection
+dicom-organizer /path/to/dicom-root -t EchoTime -t InPlanePhaseEncodingDirection
 ```
+
+よく使う短縮形として、`-i/--input`, `-o/--output`, `-p/--profile`,
+`-n/--dry-run`, `-f/--force-read`, `-l/--limit`, `-t/--dicom-tag`,
+`-v/--verbose` が使えます。
 
 GUIを使う場合:
 

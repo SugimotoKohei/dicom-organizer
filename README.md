@@ -30,7 +30,7 @@ uv tool install --editable . --force
 Run the organizer:
 
 ```bash
-dicom-organizer /path/to/dicom-root -f --if-exists skip
+dicom-organizer /path/to/dicom-root
 ```
 
 Check the installed version:
@@ -43,12 +43,16 @@ A dry run is optional, but useful when checking a new input folder or output
 template before writing files:
 
 ```bash
-dicom-organizer /path/to/dicom-root -n -f --if-exists skip
+dicom-organizer /path/to/dicom-root -n
 ```
 
 `-i /path/to/dicom-root` and `--input /path/to/dicom-root` are still accepted
 for compatibility, but the positional input path is preferred. By default, files are copied to
 `<input>/organized/`. Source files are not removed.
+By default, non-standard files are not force-read and existing output files
+raise an error. Add `-f/--force-read` only when a scanner or export tool
+produces non-standard DICOM files. Add `--if-exists skip` when re-running into
+an existing output folder and you want to leave existing files untouched.
 The default metadata profile is `auto`, which writes a single
 `dicom_parameters.csv` for supported image modalities (`MR`, `CT`, `US`, `XA`,
 `PT`) and expands columns based on the modalities actually present. Use
@@ -175,7 +179,7 @@ uv tool install --editable . --force
 整理を実行します。
 
 ```bash
-dicom-organizer /path/to/dicom-root -f --if-exists skip
+dicom-organizer /path/to/dicom-root
 ```
 
 インストール済みバージョンを確認します。
@@ -188,12 +192,16 @@ dry-runは必須ではありませんが、新しい入力フォルダや出力�
 書き込みなしで確認したい場合に便利です。
 
 ```bash
-dicom-organizer /path/to/dicom-root -n -f --if-exists skip
+dicom-organizer /path/to/dicom-root -n
 ```
 
 互換性のため `-i /path/to/dicom-root` と `--input /path/to/dicom-root` も
 引き続き使えますが、通常は位置引数の入力パスを推奨します。
 既定では `<input>/organized/` にコピーされます。元ファイルは消えません。
+既定では非標準DICOMのforce readは行わず、出力先に既存ファイルがある場合は
+エラーにします。スキャナやexport tool由来の非標準DICOMを読む必要がある場合だけ
+`-f/--force-read` を付けます。既存の出力フォルダへ再実行し、既存ファイルを
+そのまま残したい場合は `--if-exists skip` を付けます。
 既定の metadata profile は `auto` で、対応している画像モダリティ（`MR`, `CT`,
 `US`, `XA`, `PT`）を 1 つの `dicom_parameters.csv` にまとめ、実際に含まれる
 モダリティに応じて列を広げます。共通列だけ欲しい場合は `--profile generic`、

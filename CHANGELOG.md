@@ -13,6 +13,7 @@ occur, but they should be documented here.
 - Add common short CLI options for output, profile, dry-run, force-read, limit,
   custom DICOM tags, and verbose output.
 - Update CLI examples to prefer `dicom-organizer /path/to/dicom-root`.
+- Clarify that `--force-read` and `--if-exists skip` are optional, not defaults.
 
 ## 0.1.3 - 2026-05-20
 

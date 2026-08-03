@@ -107,9 +107,32 @@ files that would be created.
 
 `--profile auto` writes the union of columns for supported modalities present in
 the input. `--profile generic` writes common columns only. Repeatable
-`--dicom-tag` columns are appended after the profile columns. See
+`--dicom-tag` columns are appended to both CSV files after the profile columns.
+`series_summary.csv` is generated only from the prepared `dicom_parameters.csv`
+rows; it does not read or derive a separate set of DICOM values. Every summary
+column is therefore also present in `dicom_parameters.csv`. Series aggregates
+such as `FileCount`, `EchoCount`, and `EchoTimes_ms` are repeated on the
+corresponding parameter rows. Per-image identifiers, filenames, instance
+numbers, and image positions remain parameter-only because they cannot be
+represented by one unambiguous series value. See
 [CSV Schema](docs/csv-schema.md) for the full CSV row scope, modality-specific
 columns, `N/A` handling, and summary counts.
+
+MR outputs include `InPlanePhaseEncodingDirection` and the derived
+`PhaseEncodingDirectionPatient` in both `dicom_parameters.csv` and
+`series_summary.csv`. The derived value maps the DICOM `ROW`/`COL` image axis
+through `ImageOrientationPatient` and writes the positive image-index direction
+as a patient-relative arrow such as `R→L`, `A→P`, or `H→F`. `PatientPosition`
+is also retained in both CSV files for reference, but is not used as a geometric
+transform because DICOM defines it as an annotation. Missing or
+unsupported source geometry produces `N/A`.
+
+The MR column `ParallelReductionFactorInPlane` reports the standard DICOM
+in-plane parallel-imaging acceleration factor in both CSV files. For example,
+`2.0` means a twofold measurement-time reduction factor. Classic top-level and
+Enhanced MR functional-group values are supported. For Siemens DICOM without
+the standard attribute, the explicit CSA protocol value `sPat.lAccelFactPE` is
+used as a fallback. If neither value exists, the result is `N/A`.
 
 ### Common Options
 
@@ -123,7 +146,7 @@ dicom-organizer /path/to/dicom-root --patient-mode drop
 Add extra DICOM tags to the CSV:
 
 ```bash
-dicom-organizer /path/to/dicom-root -t EchoTime -t InPlanePhaseEncodingDirection
+dicom-organizer /path/to/dicom-root -t EchoTime -t TransmitCoilName
 ```
 
 Common short options are also available: `-i/--input`, `-o/--output`,
@@ -254,8 +277,28 @@ csv_excluded_files_by_modality=PR=2
 
 `--profile auto` は入力内に存在する対応モダリティの列をまとめて出力します。
 `--profile generic` は共通列だけを出力します。繰り返し指定できる `--dicom-tag`
-列はprofile列の後ろに追加されます。CSVの行単位、モダリティ別列、`N/A` の扱い、
-summary件数の詳細は [CSV Schema](docs/csv-schema.md) を参照してください。
+列は両CSVのprofile列の後ろに追加されます。`series_summary.csv` は、準備済みの
+`dicom_parameters.csv` 用rowだけから生成し、DICOM値を別経路で読み直したり
+導出したりしません。そのため、summaryの全列は `dicom_parameters.csv` にも
+存在します。`FileCount`、`EchoCount`、`EchoTimes_ms` などのseries集計値は、
+対応するparameters各行にも繰り返し出力します。画像固有の識別子、ファイル名、
+instance number、画像位置は、seriesの単一値にできないためparametersだけに残します。
+CSVの行単位、モダリティ別列、`N/A` の扱い、summary件数の詳細は
+[CSV Schema](docs/csv-schema.md) を参照してください。
+
+MR出力では、`InPlanePhaseEncodingDirection` と、そこから導出した
+`PhaseEncodingDirectionPatient` を `dicom_parameters.csv` と
+`series_summary.csv` の両方に出力します。導出列はDICOMの `ROW` / `COL` 軸を
+`ImageOrientationPatient` で患者座標へ写像し、画像indexが増える向きを `R→L`、
+`A→P`、`H→F` などの矢印で表します。参照用の `PatientPosition` も両CSVに
+残しますが、DICOM上は注釈情報なので幾何変換には
+使いません。必要なgeometryが欠損または非対応の場合は `N/A` になります。
+
+MR列の `ParallelReductionFactorInPlane` には、標準DICOMの面内パラレル
+イメージング倍速数を両CSVへ出力します。たとえば `2.0` は測定時間の短縮係数が
+2倍であることを表します。classic DICOMのtop-level属性とEnhanced MRの
+functional groupに対応します。標準属性がないSiemens DICOMでは、CSA protocolの
+明示値 `sPat.lAccelFactPE` をfallbackとして使います。どちらもない場合は `N/A` です。
 
 ### よく使うオプション
 
@@ -269,7 +312,7 @@ dicom-organizer /path/to/dicom-root --patient-mode drop
 任意のDICOMタグをCSVに追加する場合:
 
 ```bash
-dicom-organizer /path/to/dicom-root -t EchoTime -t InPlanePhaseEncodingDirection
+dicom-organizer /path/to/dicom-root -t EchoTime -t TransmitCoilName
 ```
 
 よく使う短縮形として、`-i/--input`, `-o/--output`, `-p/--profile`,

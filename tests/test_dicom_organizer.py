@@ -24,7 +24,9 @@ from dicom_organizer.core import (
     DEFAULT_FILE_TEMPLATE,
     DEFAULT_SERIES_DIR_TEMPLATE,
     build_items,
+    parallel_reduction_factor_in_plane_value,
     parse_args,
+    phase_encoding_direction_patient,
     print_summary,
     run,
 )
@@ -40,7 +42,19 @@ def write_dicom(
     patient_name: str = "Test^Patient",
     acquisition_date: str = "20260515",
     echo_time: float = 10.0,
-    phase_encoding_direction: str = "ROW",
+    phase_encoding_direction: str | None = "ROW",
+    image_orientation_patient: tuple[float, ...] | list[float] | None = (
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+    ),
+    patient_position: str | None = "HFS",
+    anatomical_orientation_type: str | None = None,
+    parallel_reduction_factor_in_plane: float | None = None,
+    siemens_private_parallel_reduction_factor: float | None = None,
     protocol_name: str | None = None,
     series_description: str | None = None,
     manufacturer: str = "UnitTest",
@@ -92,6 +106,12 @@ def write_dicom(
     ds.SliceThickness = 4
     ds.SpacingBetweenSlices = 4.5
     ds.SliceLocation = 12.0
+    if image_orientation_patient is not None:
+        ds.ImageOrientationPatient = list(image_orientation_patient)
+    if patient_position is not None:
+        ds.PatientPosition = patient_position
+    if anatomical_orientation_type is not None:
+        ds.AnatomicalOrientationType = anatomical_orientation_type
     if image_type is None:
         ds.ImageType = ["ORIGINAL", "PRIMARY"]
     elif image_type:
@@ -99,7 +119,8 @@ def write_dicom(
     if modality == "MR":
         ds.RepetitionTime = 1000
         ds.EchoTime = echo_time
-        ds.InPlanePhaseEncodingDirection = phase_encoding_direction
+        if phase_encoding_direction is not None:
+            ds.InPlanePhaseEncodingDirection = phase_encoding_direction
         if sequence_name is not None:
             ds.SequenceName = sequence_name
         ds.InversionTime = 120
@@ -109,6 +130,8 @@ def write_dicom(
         ds.NumberOfPhaseEncodingSteps = 12
         ds.PercentSampling = 80
         ds.PercentPhaseFieldOfView = 75
+        if parallel_reduction_factor_in_plane is not None:
+            ds.ParallelReductionFactorInPlane = parallel_reduction_factor_in_plane
         ds.SAR = 0.42
     if modality == "CT":
         ds.KVP = 120
@@ -139,6 +162,13 @@ def write_dicom(
         item = Dataset()
         item.PulseSequenceName = philips_private_pulse_sequence_name
         ds.add_new((0x2005, 0x140F), "SQ", Sequence([item]))
+    if siemens_private_parallel_reduction_factor is not None:
+        protocol = (
+            "### ASCCONV BEGIN ###\n"
+            f"sPat.lAccelFactPE = {siemens_private_parallel_reduction_factor:g}\n"
+            "### ASCCONV END ###\n"
+        ).encode()
+        ds.add_new((0x0021, 0x1019), "OB", protocol)
     ds.save_as(path, enforce_file_format=True)
 
 
@@ -347,9 +377,10 @@ def test_run_writes_files_and_metadata(tmp_path: Path) -> None:
     assert rows[0]["NumberOfPhaseEncodingSteps"] == "12"
     assert rows[0]["PercentSampling"] == "80.0"
     assert rows[0]["PercentPhaseFOV"] == "75.0"
+    assert rows[0]["ParallelReductionFactorInPlane"] == "N/A"
     assert rows[0]["SAR"] == "0.42"
-    assert "PhaseEncodingDirection" not in rows[0]
-    assert "InPlanePhaseEncodingDirection" not in rows[0]
+    assert rows[0]["InPlanePhaseEncodingDirection"] == "ROW"
+    assert rows[0]["PhaseEncodingDirectionPatient"] == "R→L"
     assert all("(" not in column and ")" not in column for column in rows[0])
 
     with (date_dir / "dicom_parameters.csv").open(encoding="utf-8-sig", newline="") as handle:
@@ -363,10 +394,251 @@ def test_run_writes_files_and_metadata(tmp_path: Path) -> None:
     assert metadata_row["NumberOfPhaseEncodingSteps"] == "12"
     assert metadata_row["PercentSampling"] == "80.0"
     assert metadata_row["PercentPhaseFOV"] == "75.0"
+    assert metadata_row["ParallelReductionFactorInPlane"] == "N/A"
     assert metadata_row["SAR"] == "0.42"
-    assert "PhaseEncodingDirection" not in metadata_row
-    assert "InPlanePhaseEncodingDirection" not in metadata_row
+    assert metadata_row["InPlanePhaseEncodingDirection"] == "ROW"
+    assert metadata_row["PhaseEncodingDirectionPatient"] == "R→L"
+    assert metadata_row["PatientPosition"] == "HFS"
     assert all("(" not in column and ")" not in column for column in metadata_row)
+
+
+def test_series_summary_columns_and_aggregates_share_parameter_rows(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    series_uid = generate_uid()
+    for instance_number, echo_time in ((1, 10), (2, 20)):
+        write_dicom(
+            input_root / f"echo{instance_number}.dcm",
+            series_uid=series_uid,
+            sop_uid=generate_uid(),
+            series_number=1,
+            instance_number=instance_number,
+            echo_time=echo_time,
+            manufacturer="SIEMENS",
+        )
+
+    run(args_for(input_root, output_root))
+
+    date_dir = output_root / "20260515"
+    with (date_dir / "dicom_parameters.csv").open(
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        parameter_reader = csv.DictReader(handle)
+        parameter_rows = list(parameter_reader)
+        parameter_columns = set(parameter_reader.fieldnames or [])
+    with (date_dir / "series_summary.csv").open(
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        summary_reader = csv.DictReader(handle)
+        summary_row = next(summary_reader)
+        summary_columns = set(summary_reader.fieldnames or [])
+
+    assert summary_columns <= parameter_columns
+    assert {
+        "OrganizedFileName",
+        "SOPInstanceUID",
+        "InstanceNumber",
+        "SliceLocation_mm",
+        "SourceFileName",
+        "ImagePositionPatient",
+    }.isdisjoint(summary_columns)
+    assert {row["TE_ms"] for row in parameter_rows} == {"10.0", "20.0"}
+    assert summary_row["TE_ms"] == "10.0|20.0"
+    for row in parameter_rows:
+        assert row["SeriesUIDHash"] == summary_row["SeriesUIDHash"]
+        assert row["FileCount"] == summary_row["FileCount"] == "2"
+        assert row["EchoCount"] == summary_row["EchoCount"] == "2"
+        assert row["EchoTimes_ms"] == summary_row["EchoTimes_ms"] == "10.0|20.0"
+    for column in (
+        "PixelBandwidth_Hz_per_px",
+        "FlipAngle_deg",
+        "MagneticFieldStrength_T",
+        "ScanningSequence",
+        "SequenceVariant",
+        "SequenceName",
+        "ImageOrientationPatient",
+        "PatientPosition",
+        "ParallelReductionFactorInPlane",
+        "SiemensIceDims",
+    ):
+        assert column in parameter_columns
+        assert column in summary_columns
+
+
+@pytest.mark.parametrize(
+    (
+        "plane",
+        "phase_axis",
+        "image_orientation_patient",
+        "patient_position",
+        "expected_direction",
+    ),
+    [
+        ("TRA", "ROW", (1, 0, 0, 0, 1, 0), "HFS", "R→L"),
+        ("COR", "COL", (1, 0, 0, 0, 0, -1), "FFS", "H→F"),
+        ("SAG", "ROW", (0, 1, 0, 0, 0, -1), "HFP", "A→P"),
+    ],
+)
+def test_siemens_patient_phase_encoding_direction_for_cardinal_planes(
+    tmp_path: Path,
+    plane: str,
+    phase_axis: str,
+    image_orientation_patient: tuple[int, ...],
+    patient_position: str,
+    expected_direction: str,
+) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    write_dicom(
+        input_root / f"{plane.lower()}.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        manufacturer="SIEMENS",
+        series_description=f"Siemens {plane}",
+        phase_encoding_direction=phase_axis,
+        image_orientation_patient=image_orientation_patient,
+        patient_position=patient_position,
+    )
+
+    run(args_for(input_root, output_root))
+
+    date_dir = output_root / "20260515"
+    with (date_dir / "dicom_parameters.csv").open(
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        metadata_row = next(csv.DictReader(handle))
+    assert metadata_row["InPlanePhaseEncodingDirection"] == phase_axis
+    assert metadata_row["PhaseEncodingDirectionPatient"] == expected_direction
+    assert metadata_row["PatientPosition"] == patient_position
+
+    with (date_dir / "series_summary.csv").open(
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        summary_row = next(csv.DictReader(handle))
+    assert summary_row["InPlanePhaseEncodingDirection"] == phase_axis
+    assert summary_row["PhaseEncodingDirectionPatient"] == expected_direction
+
+
+def test_siemens_parallel_reduction_factor_is_written_to_both_csvs(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "parallel.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        manufacturer="SIEMENS",
+        parallel_reduction_factor_in_plane=2.0,
+        siemens_private_parallel_reduction_factor=3.0,
+    )
+
+    run(args_for(input_root, output_root))
+
+    date_dir = output_root / "20260515"
+    for csv_name in ("dicom_parameters.csv", "series_summary.csv"):
+        with (date_dir / csv_name).open(encoding="utf-8-sig", newline="") as handle:
+            row = next(csv.DictReader(handle))
+        assert row["ParallelReductionFactorInPlane"] == "2.0"
+
+
+def test_siemens_private_parallel_reduction_factor_fallback_is_written(
+    tmp_path: Path,
+) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "parallel_private.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        manufacturer="Siemens Healthineers",
+        siemens_private_parallel_reduction_factor=3.0,
+    )
+
+    run(args_for(input_root, output_root))
+
+    date_dir = output_root / "20260515"
+    for csv_name in ("dicom_parameters.csv", "series_summary.csv"):
+        with (date_dir / csv_name).open(encoding="utf-8-sig", newline="") as handle:
+            row = next(csv.DictReader(handle))
+        assert row["ParallelReductionFactorInPlane"] == "3.0"
+
+
+def test_siemens_private_parallel_reduction_factor_is_vendor_scoped() -> None:
+    ds = Dataset()
+    ds.Manufacturer = "Other Vendor"
+    ds.add_new((0x0021, 0x1019), "OB", b"sPat.lAccelFactPE = 4")
+
+    assert parallel_reduction_factor_in_plane_value(ds) is None
+
+
+@pytest.mark.parametrize(
+    ("phase_axis", "image_orientation_patient", "anatomical_orientation_type"),
+    [
+        (None, (1, 0, 0, 0, 1, 0), None),
+        ("ROW", None, None),
+        ("OTHER", (1, 0, 0, 0, 1, 0), None),
+        ("ROW", (1, 0, 0, 0, 1, 0), "QUADRUPED"),
+    ],
+)
+def test_patient_phase_encoding_direction_is_na_when_not_derivable(
+    tmp_path: Path,
+    phase_axis: str | None,
+    image_orientation_patient: tuple[int, ...] | None,
+    anatomical_orientation_type: str | None,
+) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "one.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        phase_encoding_direction=phase_axis,
+        image_orientation_patient=image_orientation_patient,
+        anatomical_orientation_type=anatomical_orientation_type,
+    )
+
+    run(args_for(input_root, output_root))
+
+    with (output_root / "20260515" / "dicom_parameters.csv").open(
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        row = next(csv.DictReader(handle))
+    assert row["PhaseEncodingDirectionPatient"] == "N/A"
+
+
+def test_enhanced_mr_functional_groups_supply_patient_phase_direction() -> None:
+    orientation = Dataset()
+    orientation.ImageOrientationPatient = [1, 0, 0, 0, 0, -1]
+    geometry = Dataset()
+    geometry.InPlanePhaseEncodingDirection = "COLUMN"
+    modifier = Dataset()
+    modifier.ParallelReductionFactorInPlane = 3.0
+    shared = Dataset()
+    shared.PlaneOrientationSequence = Sequence([orientation])
+    shared.MRFOVGeometrySequence = Sequence([geometry])
+    shared.MRModifierSequence = Sequence([modifier])
+    ds = Dataset()
+    ds.SharedFunctionalGroupsSequence = Sequence([shared])
+
+    assert phase_encoding_direction_patient(ds) == "H→F"
+    assert float(parallel_reduction_factor_in_plane_value(ds)) == 3.0
 
 
 def test_metadata_tables_exclude_non_image_objects(tmp_path: Path) -> None:
@@ -1127,6 +1399,17 @@ def test_custom_dicom_tags_are_written_to_metadata_csv(tmp_path: Path) -> None:
     assert row["CustomPhase"] == "ROW"
     assert row["DICOM_InPlanePhaseEncodingDirection"] == "ROW"
     assert row["PrivateMissing"] == "N/A"
+
+    with (output_root / "20260515" / "series_summary.csv").open(
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        summary_row = next(csv.DictReader(handle))
+    assert summary_row["DICOM_EchoTime"] == "10.0"
+    assert summary_row["DICOM_RepetitionTime"] == "1000.0"
+    assert summary_row["CustomPhase"] == "ROW"
+    assert summary_row["DICOM_InPlanePhaseEncodingDirection"] == "ROW"
+    assert summary_row["PrivateMissing"] == "N/A"
 
     with (output_root / "organize_summary.json").open(encoding="utf-8") as handle:
         assert "EchoTime" in handle.read()

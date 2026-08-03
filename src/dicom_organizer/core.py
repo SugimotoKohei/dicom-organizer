@@ -22,6 +22,7 @@ import csv
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import re
 import shutil
@@ -74,10 +75,12 @@ def merge_columns(*groups: list[str] | tuple[str, ...]) -> list[str]:
 COMMON_METADATA_COLUMNS = [
     "OrganizedFileName",
     "SeriesUID",
+    "SeriesUIDHash",
     "SOPInstanceUID",
     "SeriesNumber",
     "SeriesDescription",
     "ProtocolName",
+    "FileCount",
     "InstanceNumber",
     "AcquisitionDate",
     "AcquisitionTime",
@@ -105,6 +108,7 @@ COMMON_METADATA_COLUMNS = [
     "PixelSpacing",
     "ImagePositionPatient",
     "ImageOrientationPatient",
+    "PatientPosition",
     "FrameOfReferenceUID",
     "StudyInstanceUID",
     "IsNormalized",
@@ -113,6 +117,8 @@ COMMON_METADATA_COLUMNS = [
 MR_METADATA_COLUMNS = [
     "TR_ms",
     "TE_ms",
+    "EchoCount",
+    "EchoTimes_ms",
     "PixelBandwidth_Hz_per_px",
     "EchoTrainLength",
     "FlipAngle_deg",
@@ -127,11 +133,16 @@ MR_METADATA_COLUMNS = [
     "NumberOfPhaseEncodingSteps",
     "PercentSampling",
     "PercentPhaseFOV",
+    "ParallelReductionFactorInPlane",
     "SAR",
+    "InPlanePhaseEncodingDirection",
+    "PhaseEncodingDirectionPatient",
     "ReceiveCoilName",
     "MRAcquisitionType",
     "SiemensChannelMixing",
     "SiemensCoilElement",
+    "CoilElementCount",
+    "CoilElements",
     "SiemensIceDims",
     "SiemensIceDimChannel",
     "SiemensIceDimEcho",
@@ -169,74 +180,68 @@ PT_METADATA_COLUMNS = [
     "DecayCorrection",
 ]
 
-COMMON_SUMMARY_COLUMNS = [
-    "AcquisitionDate",
-    "SeriesNumber",
-    "SeriesUID",
-    "SeriesUIDHash",
-    "Modality",
-    "SeriesDescription",
-    "ProtocolName",
-    "FileCount",
-    "Rows",
-    "Columns",
-    "Matrix_RowsxCols",
-    "FOV_HxW_mm",
-    "ImageType",
-    "Manufacturer",
-    "ManufacturerModelName",
-]
+PER_INSTANCE_METADATA_COLUMNS = {
+    "OrganizedFileName",
+    "SOPInstanceUID",
+    "InstanceNumber",
+    "SliceLocation_mm",
+    "SourceFileName",
+    "ImagePositionPatient",
+}
 
-MR_SUMMARY_COLUMNS = [
-    "EchoCount",
-    "EchoTimes_ms",
-    "CoilElementCount",
-    "CoilElements",
-    "MRAcquisitionType",
-    "TR_ms",
-    "InversionTime_ms",
-    "EchoNumbers",
-    "EchoTrainLength",
-    "NumberOfAverages",
-    "AcquisitionMatrix",
-    "NumberOfPhaseEncodingSteps",
-    "PercentSampling",
-    "PercentPhaseFOV",
-    "SAR",
-    "ReceiveCoilName",
-]
+COMMON_SUMMARY_COLUMNS = merge_columns(
+    [
+        "AcquisitionDate",
+        "SeriesNumber",
+        "SeriesUID",
+        "SeriesUIDHash",
+        "Modality",
+        "SeriesDescription",
+        "ProtocolName",
+        "FileCount",
+        "Rows",
+        "Columns",
+        "Matrix_RowsxCols",
+        "FOV_HxW_mm",
+        "ImageType",
+        "Manufacturer",
+        "ManufacturerModelName",
+    ],
+    [
+        column
+        for column in COMMON_METADATA_COLUMNS
+        if column not in PER_INSTANCE_METADATA_COLUMNS
+    ],
+)
 
-CT_SUMMARY_COLUMNS = [
-    "KVP_kV",
-    "XRayTubeCurrent_mA",
-    "ExposureTime_ms",
-    "ConvolutionKernel",
-    "ReconstructionDiameter_mm",
-]
-
-US_SUMMARY_COLUMNS = [
-    "TransducerData",
-    "TransducerType",
-    "MechanicalIndex",
-    "ThermalIndex",
-    "UltrasoundColorDataPresent",
-]
-
-XA_SUMMARY_COLUMNS = [
-    "KVP_kV",
-    "XRayTubeCurrent_mA",
-    "ExposureTime_ms",
-    "FrameTime_ms",
-    "DistanceSourceToDetector_mm",
-    "DistanceSourceToPatient_mm",
-]
-
-PT_SUMMARY_COLUMNS = [
-    "Radiopharmaceutical",
-    "RadionuclideTotalDose_Bq",
-    "RadionuclideHalfLife_s",
-    "DecayCorrection",
-]
+# Modality-specific summary values use the same columns as dicom_parameters.csv.
+MR_SUMMARY_COLUMNS = merge_columns(
+    [
+        "EchoCount",
+        "EchoTimes_ms",
+        "CoilElementCount",
+        "CoilElements",
+        "MRAcquisitionType",
+        "TR_ms",
+        "InversionTime_ms",
+        "EchoNumbers",
+        "EchoTrainLength",
+        "NumberOfAverages",
+        "AcquisitionMatrix",
+        "NumberOfPhaseEncodingSteps",
+        "PercentSampling",
+        "PercentPhaseFOV",
+        "SAR",
+        "InPlanePhaseEncodingDirection",
+        "PhaseEncodingDirectionPatient",
+        "ReceiveCoilName",
+    ],
+    MR_METADATA_COLUMNS,
+)
+CT_SUMMARY_COLUMNS = list(CT_METADATA_COLUMNS)
+US_SUMMARY_COLUMNS = list(US_METADATA_COLUMNS)
+XA_SUMMARY_COLUMNS = list(XA_METADATA_COLUMNS)
+PT_SUMMARY_COLUMNS = list(PT_METADATA_COLUMNS)
 
 PROFILE_NAMES = ("auto", "generic", "mr", "ct", "us", "xa", "pt")
 
@@ -246,6 +251,10 @@ DEFAULT_FILE_TEMPLATE = "{instance_number_6}.dcm"
 ACTIONS = ("copy", "symlink", "hardlink", "move")
 IF_EXISTS_MODES = ("error", "skip", "overwrite", "rename")
 PATIENT_MODES = ("keep", "hash", "drop")
+
+SIEMENS_PARALLEL_REDUCTION_FACTOR_PATTERN = re.compile(
+    rb"(?:^|[\x00\r\n ])sPat\.lAccelFactPE\s*=\s*([0-9]+(?:\.[0-9]+)?)"
+)
 
 
 @dataclass(frozen=True)
@@ -477,7 +486,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=[],
         metavar="TAG",
         help=(
-            "Also write this DICOM tag to dicom_parameters.csv. Repeatable. "
+            "Also write this DICOM tag to both metadata CSV files. Repeatable. "
             "Accepts keywords such as EchoTime, numeric tags such as 0018,0081 "
             "or 0x00180081, and optional ColumnName=TAG."
         ),
@@ -920,6 +929,132 @@ def pixel_spacing(ds: pydicom.dataset.Dataset) -> str:
     return text_value(getattr(ds, "PixelSpacing", None), default="N/A")
 
 
+def functional_group_value(
+    ds: pydicom.dataset.Dataset,
+    sequence_name: str,
+    attribute_name: str,
+) -> Any | None:
+    """Return the first shared/per-frame functional-group attribute value."""
+    for functional_groups_name in (
+        "SharedFunctionalGroupsSequence",
+        "PerFrameFunctionalGroupsSequence",
+    ):
+        functional_groups = getattr(ds, functional_groups_name, None)
+        if not functional_groups:
+            continue
+        nested_sequence = getattr(functional_groups[0], sequence_name, None)
+        if not nested_sequence:
+            continue
+        value = getattr(nested_sequence[0], attribute_name, None)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def image_orientation_patient_value(ds: pydicom.dataset.Dataset) -> Any | None:
+    value = getattr(ds, "ImageOrientationPatient", None)
+    if value is not None and value != "":
+        return value
+    return functional_group_value(
+        ds,
+        "PlaneOrientationSequence",
+        "ImageOrientationPatient",
+    )
+
+
+def in_plane_phase_encoding_direction_value(ds: pydicom.dataset.Dataset) -> Any | None:
+    value = getattr(ds, "InPlanePhaseEncodingDirection", None)
+    if value is not None and value != "":
+        return value
+    return functional_group_value(
+        ds,
+        "MRFOVGeometrySequence",
+        "InPlanePhaseEncodingDirection",
+    )
+
+
+def parallel_reduction_factor_in_plane_value(ds: pydicom.dataset.Dataset) -> Any | None:
+    value = getattr(ds, "ParallelReductionFactorInPlane", None)
+    if value is not None and value != "":
+        return value
+    value = functional_group_value(
+        ds,
+        "MRModifierSequence",
+        "ParallelReductionFactorInPlane",
+    )
+    if value is not None and value != "":
+        return value
+    if "siemens" not in ds_value(ds, "Manufacturer", default="").casefold():
+        return None
+
+    for element in ds:
+        if not element.tag.is_private or not isinstance(element.value, bytes):
+            continue
+        match = SIEMENS_PARALLEL_REDUCTION_FACTOR_PATTERN.search(element.value)
+        if match is None:
+            continue
+        try:
+            factor = float(match.group(1))
+        except ValueError:
+            continue
+        if factor > 0:
+            return factor
+    return None
+
+
+def direction_cosines(value: Any) -> tuple[float, ...] | None:
+    if value is None or value == "":
+        return None
+    values = value.split("\\") if isinstance(value, str) else value
+    try:
+        cosines = tuple(float(component) for component in values)
+    except (TypeError, ValueError):
+        return None
+    if len(cosines) != 6 or not all(math.isfinite(component) for component in cosines):
+        return None
+    return cosines
+
+
+def phase_encoding_direction_patient(ds: pydicom.dataset.Dataset) -> str:
+    """Map the positive phase-encoding image axis to a biped patient direction."""
+    anatomical_orientation_type = ds_value(
+        ds,
+        "AnatomicalOrientationType",
+        default="BIPED",
+    ).upper()
+    if anatomical_orientation_type not in {"BIPED", "N/A"}:
+        return "N/A"
+
+    phase_axis = text_value(
+        in_plane_phase_encoding_direction_value(ds),
+        default="",
+    ).upper()
+    cosines = direction_cosines(image_orientation_patient_value(ds))
+    if cosines is None:
+        return "N/A"
+    if phase_axis == "ROW":
+        vector = cosines[:3]
+    elif phase_axis in {"COL", "COLUMN"}:
+        vector = cosines[3:]
+    else:
+        return "N/A"
+
+    dominant_axis = max(range(3), key=lambda index: abs(vector[index]))
+    component = vector[dominant_axis]
+    if abs(component) < 1e-6:
+        return "N/A"
+
+    negative_to_positive = (
+        ("R", "L"),
+        ("A", "P"),
+        ("F", "H"),
+    )
+    start, end = negative_to_positive[dominant_axis]
+    if component < 0:
+        start, end = end, start
+    return f"{start}\N{RIGHTWARDS ARROW}{end}"
+
+
 def fov_text(ds: pydicom.dataset.Dataset) -> str:
     try:
         spacing = getattr(ds, "PixelSpacing")
@@ -1001,15 +1136,24 @@ def metadata_columns_for_profile(
     return merge_columns(columns, extra_metadata_columns or [])
 
 
-def summary_columns_for_profile(profile_name: str, rows: list[dict[str, str]]) -> list[str]:
+def summary_columns_for_profile(
+    profile_name: str,
+    rows: list[dict[str, str]],
+    extra_metadata_columns: list[str] | None = None,
+) -> list[str]:
     if profile_name == "generic":
-        return list(COMMON_SUMMARY_COLUMNS)
-    if profile_name == "auto":
-        return merge_columns(
+        columns = list(COMMON_SUMMARY_COLUMNS)
+    elif profile_name == "auto":
+        columns = merge_columns(
             COMMON_SUMMARY_COLUMNS,
             *(profile.summary_columns for profile in present_modality_profiles(rows)),
         )
-    return merge_columns(COMMON_SUMMARY_COLUMNS, MODALITY_PROFILES[profile_name].summary_columns)
+    else:
+        columns = merge_columns(
+            COMMON_SUMMARY_COLUMNS,
+            MODALITY_PROFILES[profile_name].summary_columns,
+        )
+    return merge_columns(columns, extra_metadata_columns or [])
 
 
 def file_context(
@@ -1039,12 +1183,16 @@ def file_context(
     manufacturer = ds_value(ds, "Manufacturer")
     sequence_name = sequence_name_text(ds)
     modality = ds_value(ds, "Modality")
+    image_orientation_patient = image_orientation_patient_value(ds)
+    in_plane_phase_encoding_direction = in_plane_phase_encoding_direction_value(ds)
 
     row = {
         "SeriesUID": series_uid,
+        "SeriesUIDHash": series_uid_hash,
         "SOPInstanceUID": sop_uid,
         "SeriesNumber": series_number(ds),
         "SeriesDescription": series_description,
+        "FileCount": "N/A",
         "InstanceNumber": str(inst),
         "AcquisitionDate": ds_value(
             ds,
@@ -1056,6 +1204,8 @@ def file_context(
         "Modality": ds_value(ds, "Modality"),
         "TR_ms": ds_value(ds, "RepetitionTime"),
         "TE_ms": ds_value(ds, "EchoTime"),
+        "EchoCount": "N/A",
+        "EchoTimes_ms": "N/A",
         "FOV_HxW_mm": fov_text(ds),
         "Matrix_RowsxCols": matrix_text(ds),
         "PixelBandwidth_Hz_per_px": ds_value(ds, "PixelBandwidth"),
@@ -1075,7 +1225,12 @@ def file_context(
         "NumberOfPhaseEncodingSteps": ds_value(ds, "NumberOfPhaseEncodingSteps"),
         "PercentSampling": ds_value(ds, "PercentSampling"),
         "PercentPhaseFOV": ds_value(ds, "PercentPhaseFieldOfView"),
+        "ParallelReductionFactorInPlane": text_value(
+            parallel_reduction_factor_in_plane_value(ds)
+        ),
         "SAR": ds_value(ds, "SAR"),
+        "InPlanePhaseEncodingDirection": text_value(in_plane_phase_encoding_direction),
+        "PhaseEncodingDirectionPatient": phase_encoding_direction_patient(ds),
         "Manufacturer": manufacturer,
         "ManufacturerModelName": ds_value(ds, "ManufacturerModelName"),
         "ReceiveCoilName": ds_value(ds, "ReceiveCoilName"),
@@ -1087,7 +1242,8 @@ def file_context(
         "Columns": ds_value(ds, "Columns"),
         "PixelSpacing": pixel_spacing(ds),
         "ImagePositionPatient": ds_value(ds, "ImagePositionPatient"),
-        "ImageOrientationPatient": ds_value(ds, "ImageOrientationPatient"),
+        "ImageOrientationPatient": text_value(image_orientation_patient),
+        "PatientPosition": ds_value(ds, "PatientPosition"),
         "FrameOfReferenceUID": ds_value(ds, "FrameOfReferenceUID"),
         "StudyInstanceUID": ds_value(ds, "StudyInstanceUID"),
         "StudyDate": ds_value(ds, "StudyDate"),
@@ -1100,6 +1256,8 @@ def file_context(
         "SOPClassUID": ds_value(ds, "SOPClassUID"),
         "SiemensChannelMixing": tag_value(ds, 0x0021, 0x1176),
         "SiemensCoilElement": tag_value(ds, 0x0021, 0x114F),
+        "CoilElementCount": "N/A",
+        "CoilElements": "N/A",
         "SiemensIceDims": siemens_ice_dims,
         "SiemensIceDimChannel": siemens_dim_channel,
         "SiemensIceDimEcho": siemens_dim_echo,
@@ -1405,7 +1563,7 @@ def write_metadata_tables(
                 row["OrganizedFileName"],
             ),
         )
-        profile_rows = metadata_rows(rows, profile_name)
+        profile_rows = add_series_aggregates(metadata_rows(rows, profile_name))
         write_csv(
             date_dir / "dicom_parameters.csv",
             metadata_columns_for_profile(profile_name, profile_rows, extra_metadata_columns),
@@ -1413,8 +1571,16 @@ def write_metadata_tables(
         )
         write_csv(
             date_dir / "series_summary.csv",
-            summary_columns_for_profile(profile_name, profile_rows),
-            build_series_summary(profile_rows, profile_name),
+            summary_columns_for_profile(
+                profile_name,
+                profile_rows,
+                extra_metadata_columns,
+            ),
+            build_series_summary(
+                profile_rows,
+                profile_name,
+                extra_metadata_columns,
+            ),
         )
 
 
@@ -1427,86 +1593,78 @@ def write_csv(path: Path, columns: list[str], rows: list[dict[str, str]]) -> Non
 
 
 def series_value(series_rows: list[dict[str, str]], column: str) -> str:
+    values: list[str] = []
+    seen: set[str] = set()
     for row in series_rows:
         value = row.get(column, "N/A")
-        if value != "N/A":
-            return value
-    return "N/A"
+        if not value or value == "N/A" or value in seen:
+            continue
+        seen.add(value)
+        values.append(value)
+    return "|".join(values) if values else "N/A"
+
+
+def series_group_key(row: dict[str, str]) -> str:
+    return row.get("OrganizedFileName", "").rsplit("/", 1)[0]
+
+
+def add_series_aggregates(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Repeat series aggregates on parameter rows so both CSVs share one source."""
+    grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
+    for row in rows:
+        grouped[series_group_key(row)].append(row)
+
+    aggregates: dict[str, dict[str, str]] = {}
+    for series_key, series_rows in grouped.items():
+        echo_times = sorted(
+            {
+                row.get("TE_ms", "N/A")
+                for row in series_rows
+                if row.get("TE_ms", "N/A") != "N/A"
+            },
+            key=natural_key,
+        )
+        coil_elements = sorted(
+            {
+                row.get("SiemensCoilElement", "N/A")
+                for row in series_rows
+                if row.get("SiemensCoilElement", "N/A") != "N/A"
+            },
+            key=natural_key,
+        )
+        is_mr = any(row_profile_name(row) == "mr" for row in series_rows)
+        aggregates[series_key] = {
+            "FileCount": str(len(series_rows)),
+            "EchoCount": str(len(echo_times)) if is_mr else "N/A",
+            "EchoTimes_ms": "|".join(echo_times) if echo_times else "N/A",
+            "CoilElementCount": str(len(coil_elements)) if is_mr else "N/A",
+            "CoilElements": "|".join(coil_elements) if coil_elements else "N/A",
+        }
+
+    enriched_rows: list[dict[str, str]] = []
+    for row in rows:
+        enriched_row = dict(row)
+        enriched_row.update(aggregates[series_group_key(row)])
+        enriched_rows.append(enriched_row)
+    return enriched_rows
 
 
 def build_series_summary(
     rows: list[dict[str, str]],
     profile_name: str = "auto",
+    extra_metadata_columns: list[str] | None = None,
 ) -> list[dict[str, str]]:
-    rows = metadata_rows(rows, profile_name)
+    rows = add_series_aggregates(metadata_rows(rows, profile_name))
     grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
     for row in rows:
-        grouped[row["OrganizedFileName"].rsplit("/", 1)[0]].append(row)
+        grouped[series_group_key(row)].append(row)
 
-    summaries = []
+    columns = summary_columns_for_profile(profile_name, rows, extra_metadata_columns)
+    summaries: list[dict[str, str]] = []
     for _series_dir, series_rows in sorted(
         grouped.items(), key=lambda item: (item[1][0]["SeriesNumber"], item[0])
     ):
-        echo_times = sorted(
-            {r["TE_ms"] for r in series_rows if r["TE_ms"] != "N/A"},
-            key=natural_key,
-        )
-        coil_elements = sorted(
-            {r["SiemensCoilElement"] for r in series_rows if r["SiemensCoilElement"] != "N/A"},
-            key=natural_key,
-        )
-        summaries.append(
-            {
-                "AcquisitionDate": series_value(series_rows, "AcquisitionDate"),
-                "SeriesNumber": series_value(series_rows, "SeriesNumber"),
-                "SeriesUID": series_value(series_rows, "SeriesUID"),
-                "SeriesUIDHash": hash_text(series_value(series_rows, "SeriesUID")),
-                "Modality": series_value(series_rows, "Modality"),
-                "SeriesDescription": series_value(series_rows, "SeriesDescription"),
-                "ProtocolName": series_value(series_rows, "ProtocolName"),
-                "FileCount": str(len(series_rows)),
-                "EchoCount": str(len(echo_times)),
-                "EchoTimes_ms": "|".join(echo_times) if echo_times else "N/A",
-                "CoilElementCount": str(len(coil_elements)),
-                "CoilElements": "|".join(coil_elements) if coil_elements else "N/A",
-                "Rows": series_value(series_rows, "Rows"),
-                "Columns": series_value(series_rows, "Columns"),
-                "Matrix_RowsxCols": series_value(series_rows, "Matrix_RowsxCols"),
-                "FOV_HxW_mm": series_value(series_rows, "FOV_HxW_mm"),
-                "ImageType": series_value(series_rows, "ImageType"),
-                "MRAcquisitionType": series_value(series_rows, "MRAcquisitionType"),
-                "TR_ms": series_value(series_rows, "TR_ms"),
-                "InversionTime_ms": series_value(series_rows, "InversionTime_ms"),
-                "EchoNumbers": series_value(series_rows, "EchoNumbers"),
-                "EchoTrainLength": series_value(series_rows, "EchoTrainLength"),
-                "NumberOfAverages": series_value(series_rows, "NumberOfAverages"),
-                "AcquisitionMatrix": series_value(series_rows, "AcquisitionMatrix"),
-                "NumberOfPhaseEncodingSteps": series_value(series_rows, "NumberOfPhaseEncodingSteps"),
-                "PercentSampling": series_value(series_rows, "PercentSampling"),
-                "PercentPhaseFOV": series_value(series_rows, "PercentPhaseFOV"),
-                "SAR": series_value(series_rows, "SAR"),
-                "Manufacturer": series_value(series_rows, "Manufacturer"),
-                "ManufacturerModelName": series_value(series_rows, "ManufacturerModelName"),
-                "ReceiveCoilName": series_value(series_rows, "ReceiveCoilName"),
-                "KVP_kV": series_value(series_rows, "KVP_kV"),
-                "XRayTubeCurrent_mA": series_value(series_rows, "XRayTubeCurrent_mA"),
-                "ExposureTime_ms": series_value(series_rows, "ExposureTime_ms"),
-                "ConvolutionKernel": series_value(series_rows, "ConvolutionKernel"),
-                "ReconstructionDiameter_mm": series_value(series_rows, "ReconstructionDiameter_mm"),
-                "TransducerData": series_value(series_rows, "TransducerData"),
-                "TransducerType": series_value(series_rows, "TransducerType"),
-                "MechanicalIndex": series_value(series_rows, "MechanicalIndex"),
-                "ThermalIndex": series_value(series_rows, "ThermalIndex"),
-                "UltrasoundColorDataPresent": series_value(series_rows, "UltrasoundColorDataPresent"),
-                "FrameTime_ms": series_value(series_rows, "FrameTime_ms"),
-                "DistanceSourceToDetector_mm": series_value(series_rows, "DistanceSourceToDetector_mm"),
-                "DistanceSourceToPatient_mm": series_value(series_rows, "DistanceSourceToPatient_mm"),
-                "Radiopharmaceutical": series_value(series_rows, "Radiopharmaceutical"),
-                "RadionuclideTotalDose_Bq": series_value(series_rows, "RadionuclideTotalDose_Bq"),
-                "RadionuclideHalfLife_s": series_value(series_rows, "RadionuclideHalfLife_s"),
-                "DecayCorrection": series_value(series_rows, "DecayCorrection"),
-            }
-        )
+        summaries.append({column: series_value(series_rows, column) for column in columns})
     return summaries
 
 

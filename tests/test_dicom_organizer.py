@@ -28,7 +28,6 @@ from dicom_organizer.core import (
     OrganizeOptions,
     build_items,
     ensure_within_output_root,
-    format_dicom_time,
     materialize,
     normalize_options,
     parallel_reduction_factor_in_plane_value,
@@ -1586,23 +1585,6 @@ def test_cli_version_prints_package_version() -> None:
     assert result.stdout.strip().startswith("dicom-organizer ")
 
 
-def test_format_dicom_time() -> None:
-    assert format_dicom_time("190429.500000") == "19:04:29.5"
-    assert format_dicom_time("190410.990000") == "19:04:10.99"
-    assert format_dicom_time("182752.265186") == "18:27:52.265186"
-    assert format_dicom_time("120000.000") == "12:00:00"
-    assert format_dicom_time("120000") == "12:00:00"
-    assert format_dicom_time("093015") == "09:30:15"
-    assert format_dicom_time("93015") == "09:30:15"
-    assert format_dicom_time("1430") == "14:30:00"
-    assert format_dicom_time("19:04:29.5") == "19:04:29.5"
-    assert format_dicom_time(None) == "N/A"
-    assert format_dicom_time("") == "N/A"
-    assert format_dicom_time("N/A") == "N/A"
-    assert format_dicom_time("invalid") == "invalid"
-    assert format_dicom_time("999999") == "999999"
-
-
 def test_csv_formats_time_fields(tmp_path: Path) -> None:
     input_root = tmp_path / "input"
     output_root = tmp_path / "organized"
@@ -1626,16 +1608,16 @@ def test_csv_formats_time_fields(tmp_path: Path) -> None:
     with (date_dir / "dicom_parameters.csv").open(encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
     assert len(rows) == 1
-    assert rows[0]["AcquisitionTime"] == "19:04:29.5"
-    assert rows[0]["StudyTime"] == "18:27:52.265186"
-    assert rows[0]["SeriesTime"] == "19:04:10.99"
+    assert rows[0]["AcquisitionTime"] == "190429.500000"
+    assert rows[0]["StudyTime"] == "182752.265186"
+    assert rows[0]["SeriesTime"] == "190410.990000"
 
     with (date_dir / "series_summary.csv").open(encoding="utf-8-sig", newline="") as handle:
         summary_rows = list(csv.DictReader(handle))
     assert len(summary_rows) == 1
-    assert summary_rows[0]["AcquisitionTime"] == "19:04:29.5"
-    assert summary_rows[0]["StudyTime"] == "18:27:52.265186"
-    assert summary_rows[0]["SeriesTime"] == "19:04:10.99"
+    assert summary_rows[0]["AcquisitionTime"] == "190429.500000"
+    assert summary_rows[0]["StudyTime"] == "182752.265186"
+    assert summary_rows[0]["SeriesTime"] == "190410.990000"
 
 
 def test_device_and_study_date_hierarchy(tmp_path: Path) -> None:

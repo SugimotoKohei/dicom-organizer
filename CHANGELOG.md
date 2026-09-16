@@ -10,7 +10,6 @@ occur, but they should be documented here.
 
 - Restructure default output folder hierarchy to `organized/<Device>/<StudyDate>/<SeriesNumber>_<SeriesFolderLabel>/`.
 - Remove `SeriesUIDHash` column from metadata CSVs.
-- Format DICOM time fields (`AcquisitionTime`, `SeriesTime`, `StudyTime`) as `HH:MM:SS[.fraction]`.
 - Sanitize `StudyDate` and verify all written paths stay strictly within `output_root` to prevent directory escape.
 - Ensure series directory names are unique across all series, reserving existing series names to prevent collisions.
 - Make file materialization atomic using temporary files and `os.replace` to prevent losing previous outputs on failure.

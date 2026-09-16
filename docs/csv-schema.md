@@ -35,8 +35,8 @@ both total organized files and CSV target files, including modality-level counts
 `dicom_parameters.csv` starts with common columns for identifiers, series labels,
 dates and times, patient fields, geometry, manufacturer information, source
 filename, image type, and spatial orientation. Time fields (`AcquisitionTime`,
-`SeriesTime`, `StudyTime`) are formatted as `HH:MM:SS[.fraction]` (for example,
-`19:04:29.5`). Missing values are written as `N/A`.
+`SeriesTime`, `StudyTime`) output raw DICOM TM values as-is (for example,
+`190429.500000`) without formatting. Missing values are written as `N/A`.
 
 Patient fields follow `--patient-mode`:
 
@@ -172,8 +172,8 @@ CSV表からは除外されます。実行summaryには、整理された総数�
 
 `dicom_parameters.csv` は、識別子、series label、日付・時刻、患者情報、幾何情報、
 メーカー情報、元ファイル名、image type、空間位置・方向の共通列から始まります。
-時刻列（`AcquisitionTime`、`SeriesTime`、`StudyTime`）は `HH:MM:SS[.fraction]` 形式
-（例: `19:04:29.5`）に整形されます。欠損値は `N/A` として出力されます。
+時刻列（`AcquisitionTime`、`SeriesTime`、`StudyTime`）は DICOM の TM 値をそのまま出力します
+（例: `190429.500000`）。整形は行いません。欠損値は `N/A` として出力されます。
 
 患者情報は `--patient-mode` に従います。
 

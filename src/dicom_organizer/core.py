@@ -664,42 +664,6 @@ def text_value(value: Any, default: str = "N/A") -> str:
     return str(value)
 
 
-def format_dicom_time(value: Any, default: str = "N/A") -> str:
-    """Format DICOM TM value (e.g. '190429.500000') as 'HH:MM:SS[.fraction]'."""
-    if value is None:
-        return default
-    text = str(value).strip()
-    if not text or text == default:
-        return default
-    if ":" in text:
-        return text
-
-    parts = text.split(".", 1)
-    time_digits = re.sub(r"\D", "", parts[0])
-    if len(time_digits) in (1, 3, 5):
-        time_digits = f"0{time_digits}"
-    if len(time_digits) < 2:
-        return text
-
-    hh = time_digits[0:2]
-    mm = time_digits[2:4] if len(time_digits) >= 4 else "00"
-    ss = time_digits[4:6] if len(time_digits) >= 6 else "00"
-
-    try:
-        if not (0 <= int(hh) <= 23 and 0 <= int(mm) <= 59 and 0 <= int(ss) <= 60):
-            return text
-    except ValueError:
-        return text
-
-    formatted = f"{hh}:{mm}:{ss}"
-    if len(parts) > 1:
-        fraction = re.sub(r"\D", "", parts[1]).rstrip("0")
-        if fraction:
-            formatted = f"{formatted}.{fraction}"
-
-    return formatted
-
-
 def ds_value(ds: pydicom.dataset.Dataset, name: str, default: str = "N/A") -> str:
     return text_value(getattr(ds, name, None), default=default)
 
@@ -1309,7 +1273,7 @@ def file_context(
             "AcquisitionDate",
             default=ds_value(ds, "StudyDate", default="unknown_date"),
         ),
-        "AcquisitionTime": format_dicom_time(ds_value(ds, "AcquisitionTime")),
+        "AcquisitionTime": ds_value(ds, "AcquisitionTime"),
         "PatientName": patient_name,
         "Modality": ds_value(ds, "Modality"),
         "TR_ms": ds_value(ds, "RepetitionTime"),
@@ -1357,9 +1321,9 @@ def file_context(
         "FrameOfReferenceUID": ds_value(ds, "FrameOfReferenceUID"),
         "StudyInstanceUID": ds_value(ds, "StudyInstanceUID"),
         "StudyDate": ds_value(ds, "StudyDate"),
-        "StudyTime": format_dicom_time(ds_value(ds, "StudyTime")),
+        "StudyTime": ds_value(ds, "StudyTime"),
         "SeriesDate": ds_value(ds, "SeriesDate"),
-        "SeriesTime": format_dicom_time(ds_value(ds, "SeriesTime")),
+        "SeriesTime": ds_value(ds, "SeriesTime"),
         "PatientID": patient_id,
         "PatientIDHash": patient_id_hash,
         "PatientNameHash": patient_hash,

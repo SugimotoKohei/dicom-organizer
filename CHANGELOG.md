@@ -8,6 +8,7 @@ occur, but they should be documented here.
 
 ## 0.2.0 - Unreleased
 
+- Add `ScanDuration` (formatted as `HH:MM:SS`) and `ScanDurationSource` columns to `dicom_parameters.csv` and `series_summary.csv`.
 - Restructure default output folder hierarchy to `organized/<Device>/<StudyDate>/<SeriesNumber>_<SeriesFolderLabel>/`.
 - Remove `SeriesUIDHash` column from metadata CSVs.
 - Sanitize `StudyDate` and verify all written paths stay strictly within `output_root` to prevent directory escape.

@@ -28,6 +28,7 @@ from dicom_organizer.core import (
     OrganizeOptions,
     build_items,
     ensure_within_output_root,
+    format_duration,
     materialize,
     normalize_options,
     parallel_reduction_factor_in_plane_value,
@@ -36,6 +37,7 @@ from dicom_organizer.core import (
     print_summary,
     run,
     safe_date,
+    scan_duration_fields,
 )
 
 
@@ -76,6 +78,10 @@ def write_dicom(
     study_time: str | None = None,
     series_time: str | None = None,
     study_uid: str | None = None,
+    acquisition_duration: float | None = None,
+    ge_acquisition_duration_us: float | None = None,
+    ge_private_creator: str = "GEMS_ACQU_01",
+    siemens_total_scan_time_sec: float | None = None,
 ) -> None:
     if sop_class_uid is None:
         sop_class_uid = {
@@ -179,11 +185,23 @@ def write_dicom(
         item = Dataset()
         item.PulseSequenceName = philips_private_pulse_sequence_name
         ds.add_new((0x2005, 0x140F), "SQ", Sequence([item]))
+    if acquisition_duration is not None:
+        ds.AcquisitionDuration = acquisition_duration
+    if ge_acquisition_duration_us is not None:
+        block = ds.private_block(0x0019, ge_private_creator, create=True)
+        block.add_new(0x5A, "FL", float(ge_acquisition_duration_us))
+    ascconv_lines: list[str] = []
     if siemens_private_parallel_reduction_factor is not None:
+        ascconv_lines.append(
+            f"sPat.lAccelFactPE = {siemens_private_parallel_reduction_factor:g}"
+        )
+    if siemens_total_scan_time_sec is not None:
+        ascconv_lines.append(f"lTotalScanTimeSec = {siemens_total_scan_time_sec:g}")
+    if ascconv_lines:
         protocol = (
             "### ASCCONV BEGIN ###\n"
-            f"sPat.lAccelFactPE = {siemens_private_parallel_reduction_factor:g}\n"
-            "### ASCCONV END ###\n"
+            + "\n".join(ascconv_lines)
+            + "\n### ASCCONV END ###\n"
         ).encode()
         ds.add_new((0x0021, 0x1019), "OB", protocol)
     ds.save_as(path, enforce_file_format=True)
@@ -1981,6 +1999,209 @@ def test_philips_anchor_label_is_scoped_to_study(tmp_path: Path) -> None:
     numeric = [name for name in names if name.startswith("000002")]
     assert len(numeric) == 1
     assert "Brain" not in numeric[0]
+
+
+def test_format_duration() -> None:
+    assert format_duration(48.2) == "00:00:48"
+    assert format_duration(54.0) == "00:00:54"
+    assert format_duration(108) == "00:01:48"
+    assert format_duration(323) == "00:05:23"
+    assert format_duration(498.039808) == "00:08:18"
+    assert format_duration(528.0) == "00:08:48"
+    assert format_duration(3661) == "01:01:01"
+    assert format_duration(0) == "N/A"
+    assert format_duration(-5) == "N/A"
+    assert format_duration(None) == "N/A"
+    assert format_duration("abc") == "N/A"
+
+
+def test_scan_duration_fields_direct() -> None:
+    ds = Dataset()
+    assert scan_duration_fields(ds) == ("N/A", "N/A")
+
+    ds.AcquisitionDuration = 54.0
+    assert scan_duration_fields(ds) == ("00:00:54", "0018,9073")
+
+
+def test_scan_duration_from_standard_tag(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    series_uid = generate_uid()
+    write_dicom(
+        input_root / "scan.dcm",
+        series_uid=series_uid,
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        acquisition_duration=528.0,
+    )
+    run(args_for(input_root, output_root))
+
+    study_dir = find_study_dir(output_root)
+    with (study_dir / "dicom_parameters.csv").open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1
+    assert rows[0]["ScanDuration"] == "00:08:48"
+    assert rows[0]["ScanDurationSource"] == "0018,9073"
+
+    with (study_dir / "series_summary.csv").open(encoding="utf-8-sig", newline="") as handle:
+        summary_rows = list(csv.DictReader(handle))
+    assert len(summary_rows) == 1
+    assert summary_rows[0]["ScanDuration"] == "00:08:48"
+    assert summary_rows[0]["ScanDurationSource"] == "0018,9073"
+
+
+def test_scan_duration_from_ge_private_tag(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    series_uid = generate_uid()
+    write_dicom(
+        input_root / "scan.dcm",
+        series_uid=series_uid,
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        manufacturer="GE MEDICAL SYSTEMS",
+        ge_acquisition_duration_us=48200000.0,
+    )
+    run(args_for(input_root, output_root))
+
+    study_dir = find_study_dir(output_root)
+    with (study_dir / "dicom_parameters.csv").open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1
+    assert rows[0]["ScanDuration"] == "00:00:48"
+    assert rows[0]["ScanDurationSource"] == "0019,105A"
+
+    with (study_dir / "series_summary.csv").open(encoding="utf-8-sig", newline="") as handle:
+        summary_rows = list(csv.DictReader(handle))
+    assert len(summary_rows) == 1
+    assert summary_rows[0]["ScanDuration"] == "00:00:48"
+    assert summary_rows[0]["ScanDurationSource"] == "0019,105A"
+
+
+def test_scan_duration_from_siemens_protocol(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    series_uid = generate_uid()
+    write_dicom(
+        input_root / "scan.dcm",
+        series_uid=series_uid,
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        manufacturer="SIEMENS",
+        siemens_total_scan_time_sec=323.0,
+    )
+    run(args_for(input_root, output_root))
+
+    study_dir = find_study_dir(output_root)
+    with (study_dir / "dicom_parameters.csv").open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1
+    assert rows[0]["ScanDuration"] == "00:05:23"
+    assert rows[0]["ScanDurationSource"] == "0021,1019:lTotalScanTimeSec"
+
+    with (study_dir / "series_summary.csv").open(encoding="utf-8-sig", newline="") as handle:
+        summary_rows = list(csv.DictReader(handle))
+    assert len(summary_rows) == 1
+    assert summary_rows[0]["ScanDuration"] == "00:05:23"
+    assert summary_rows[0]["ScanDurationSource"] == "0021,1019:lTotalScanTimeSec"
+
+
+def test_scan_duration_is_vendor_scoped(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    series_uid = generate_uid()
+    write_dicom(
+        input_root / "scan.dcm",
+        series_uid=series_uid,
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        manufacturer="UnitTest",
+        ge_acquisition_duration_us=48200000.0,
+        ge_private_creator="NOT_GEMS_ACQU_01",
+        siemens_total_scan_time_sec=323.0,
+    )
+    run(args_for(input_root, output_root))
+
+    study_dir = find_study_dir(output_root)
+    with (study_dir / "dicom_parameters.csv").open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1
+    assert rows[0]["ScanDuration"] == "N/A"
+    assert rows[0]["ScanDurationSource"] == "N/A"
+
+    with (study_dir / "series_summary.csv").open(encoding="utf-8-sig", newline="") as handle:
+        summary_rows = list(csv.DictReader(handle))
+    assert len(summary_rows) == 1
+    assert summary_rows[0]["ScanDuration"] == "N/A"
+    assert summary_rows[0]["ScanDurationSource"] == "N/A"
+
+
+def test_scan_duration_missing_is_na(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    series_uid = generate_uid()
+    write_dicom(
+        input_root / "scan.dcm",
+        series_uid=series_uid,
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+    )
+    run(args_for(input_root, output_root))
+
+    study_dir = find_study_dir(output_root)
+    with (study_dir / "dicom_parameters.csv").open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1
+    assert rows[0]["ScanDuration"] == "N/A"
+    assert rows[0]["ScanDurationSource"] == "N/A"
+
+    with (study_dir / "series_summary.csv").open(encoding="utf-8-sig", newline="") as handle:
+        summary_rows = list(csv.DictReader(handle))
+    assert len(summary_rows) == 1
+    assert summary_rows[0]["ScanDuration"] == "N/A"
+    assert summary_rows[0]["ScanDurationSource"] == "N/A"
+
+
+def test_scan_duration_priority_standard_over_ge_private(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    series_uid = generate_uid()
+    write_dicom(
+        input_root / "scan.dcm",
+        series_uid=series_uid,
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        manufacturer="GE MEDICAL SYSTEMS",
+        acquisition_duration=528.0,
+        ge_acquisition_duration_us=48200000.0,
+    )
+    run(args_for(input_root, output_root))
+
+    study_dir = find_study_dir(output_root)
+    with (study_dir / "dicom_parameters.csv").open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1
+    assert rows[0]["ScanDuration"] == "00:08:48"
+    assert rows[0]["ScanDurationSource"] == "0018,9073"
+
+    with (study_dir / "series_summary.csv").open(encoding="utf-8-sig", newline="") as handle:
+        summary_rows = list(csv.DictReader(handle))
+    assert len(summary_rows) == 1
+    assert summary_rows[0]["ScanDuration"] == "00:08:48"
+    assert summary_rows[0]["ScanDurationSource"] == "0018,9073"
+
 
 
 

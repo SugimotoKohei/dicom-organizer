@@ -32,6 +32,7 @@ import uuid
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Any
 
@@ -113,6 +114,8 @@ COMMON_METADATA_COLUMNS = [
     "FrameOfReferenceUID",
     "StudyInstanceUID",
     "IsNormalized",
+    "ScanDuration",
+    "ScanDurationSource",
 ]
 
 MR_METADATA_COLUMNS = [
@@ -254,6 +257,9 @@ PATIENT_MODES = ("keep", "hash", "drop")
 
 SIEMENS_PARALLEL_REDUCTION_FACTOR_PATTERN = re.compile(
     rb"(?:^|[\x00\r\n ])sPat\.lAccelFactPE\s*=\s*([0-9]+(?:\.[0-9]+)?)"
+)
+SIEMENS_TOTAL_SCAN_TIME_PATTERN = re.compile(
+    rb"(?:^|[\x00\r\n ])lTotalScanTimeSec\s*=\s*([0-9]+(?:\.[0-9]+)?)"
 )
 
 
@@ -1077,6 +1083,70 @@ def parallel_reduction_factor_in_plane_value(ds: pydicom.dataset.Dataset) -> Any
     return None
 
 
+def format_duration(value: Any) -> str:
+    """Format duration in seconds as HH:MM:SS rounded to the nearest second."""
+    if value is None or value == "":
+        return "N/A"
+    try:
+        sec_float = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    if not math.isfinite(sec_float) or sec_float <= 0:
+        return "N/A"
+    total_seconds = int(
+        Decimal(str(sec_float)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    )
+    if total_seconds <= 0:
+        return "N/A"
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def scan_duration_fields(ds: pydicom.dataset.Dataset) -> tuple[str, str]:
+    """Extract scan duration and source tag as (ScanDuration, ScanDurationSource)."""
+    if (0x0018, 0x9073) in ds:
+        elem = ds[0x0018, 0x9073]
+        if elem.value is not None and elem.value != "":
+            duration = format_duration(elem.value)
+            if duration != "N/A":
+                return duration, "0018,9073"
+
+    try:
+        block = ds.private_block(0x0019, "GEMS_ACQU_01")
+        if 0x5A in block:
+            elem_val = block[0x5A].value
+            if elem_val is not None and elem_val != "":
+                try:
+                    sec = float(elem_val) / 1e6
+                    duration = format_duration(sec)
+                    if duration != "N/A":
+                        return duration, "0019,105A"
+                except (TypeError, ValueError):
+                    pass
+    except KeyError:
+        pass
+
+    if "siemens" in ds_value(ds, "Manufacturer", default="").casefold():
+        for element in ds:
+            if not element.tag.is_private or not isinstance(element.value, bytes):
+                continue
+            match = SIEMENS_TOTAL_SCAN_TIME_PATTERN.search(element.value)
+            if match is None:
+                continue
+            try:
+                sec = float(match.group(1).decode("ascii"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            duration = format_duration(sec)
+            if duration != "N/A":
+                tag_str = f"{element.tag.group:04X},{element.tag.elem:04X}"
+                return duration, f"{tag_str}:lTotalScanTimeSec"
+
+    return "N/A", "N/A"
+
+
 def direction_cosines(value: Any) -> tuple[float, ...] | None:
     if value is None or value == "":
         return None
@@ -1260,6 +1330,7 @@ def file_context(
     modality = ds_value(ds, "Modality")
     image_orientation_patient = image_orientation_patient_value(ds)
     in_plane_phase_encoding_direction = in_plane_phase_encoding_direction_value(ds)
+    scan_duration, scan_duration_source = scan_duration_fields(ds)
 
     row = {
         "SeriesUID": series_uid,
@@ -1303,6 +1374,8 @@ def file_context(
             parallel_reduction_factor_in_plane_value(ds)
         ),
         "SAR": ds_value(ds, "SAR"),
+        "ScanDuration": scan_duration,
+        "ScanDurationSource": scan_duration_source,
         "InPlanePhaseEncodingDirection": text_value(in_plane_phase_encoding_direction),
         "PhaseEncodingDirectionPatient": phase_encoding_direction_patient(ds),
         "Manufacturer": manufacturer,

@@ -96,6 +96,33 @@ CSV files and is `N/A` when neither source exists; no factor is inferred from
 acquisition matrix or sampling values. See the
 [DICOM MR Modifier Macro](https://dicom.nema.org/medical/dicom/current/output/chtml/part03/sect_C.8.13.5.5.html).
 
+## Scan Duration
+
+Both `dicom_parameters.csv` and `series_summary.csv` include common columns for
+scan duration and its source:
+
+- `ScanDuration`: the total acquisition / scan duration formatted as `HH:MM:SS`
+  (rounded to the nearest second, with hours having 2 or more digits). Values
+  less than or equal to 0, non-numeric, or missing are written as `N/A`.
+- `ScanDurationSource`: an identifier indicating the tag or element where the
+  duration was found, or `N/A` if none was found.
+
+The organizer checks for scan duration in the following priority order, using
+the first valid source found:
+
+1. Top-level standard DICOM attribute `(0018,9073)` `AcquisitionDuration` in
+   seconds. `ScanDurationSource` is written as `0018,9073`.
+2. GE private block with creator `GEMS_ACQU_01` element `0x5A` in microseconds,
+   converted to seconds by dividing by `1e6`. `ScanDurationSource` is written
+   as `0019,105A`.
+3. For Siemens objects (where `Manufacturer` contains `siemens`, case-insensitive),
+   scans private binary elements for the ASCCONV protocol and extracts
+   `lTotalScanTimeSec` in seconds using regular expressions.
+   `ScanDurationSource` is constructed from the actual matched element tag
+   (for example, `0021,1019:lTotalScanTimeSec`).
+4. If none of the above are present, both `ScanDuration` and `ScanDurationSource`
+   are written as `N/A`.
+
 ## Profile Columns
 
 Profile-specific columns are appended after the common columns.
@@ -228,6 +255,28 @@ fallbackとして読み取ります。両CSVへ同じ値を出力し、どちら
 `N/A` とします。acquisition matrixやsampling値から倍速数を推測しません。定義は
 [DICOM MR Modifier Macro](https://dicom.nema.org/medical/dicom/current/output/chtml/part03/sect_C.8.13.5.5.html)
 を参照してください。
+
+## 撮像時間
+
+`dicom_parameters.csv` と `series_summary.csv` の両方に、撮像時間とその取得元を示す共通列を出力します。
+
+- `ScanDuration`: スキャン所要時間（撮像時間）を `HH:MM:SS` 形式で出力します。
+  最も近い秒に四捨五入され、1時間を超える場合は時は2桁以上になります。0以下、
+  数値化できない値、欠損値は `N/A` になります。
+- `ScanDurationSource`: 撮像時間を取得したタグまたは要素を示す文字列です。
+  取得元が存在しない場合は `N/A` になります。
+
+取得ロジックは次の優先順序で最初に見つかったものを採用します。
+
+1. トップレベルの標準タグ `(0018,9073)` `AcquisitionDuration`（秒）。
+   `ScanDurationSource` は `0018,9073` となります。
+2. private creator が `GEMS_ACQU_01` のブロックにある要素 `0x5A`（マイクロ秒）。
+   値を `1e6` で割って秒に換算します。`ScanDurationSource` は `0019,105A` となります。
+3. Siemens（`Manufacturer` に大文字小文字問わず `siemens` を含む場合）:
+   private かつ bytes 値の要素を走査し、ASCCONV プロトコル内の `lTotalScanTimeSec` を
+   正規表現で取り出して秒として使用します。`ScanDurationSource` は実際に見つかった要素のタグ
+   （例: `0021,1019:lTotalScanTimeSec`）となります。
+4. いずれも見つからない場合は、`ScanDuration` も `ScanDurationSource` も `N/A` となります。
 
 ## profile別列
 

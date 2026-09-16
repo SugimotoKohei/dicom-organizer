@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import csv
+import errno
 import json
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+import pydicom
 from pydicom.dataset import Dataset, FileDataset, FileMetaDataset
 from pydicom.sequence import Sequence
 from pydicom.uid import (
@@ -23,12 +25,18 @@ from pydicom.uid import (
 from dicom_organizer.core import (
     DEFAULT_FILE_TEMPLATE,
     DEFAULT_SERIES_DIR_TEMPLATE,
+    OrganizeOptions,
     build_items,
+    ensure_within_output_root,
+    format_dicom_time,
+    materialize,
+    normalize_options,
     parallel_reduction_factor_in_plane_value,
     parse_args,
     phase_encoding_direction_patient,
     print_summary,
     run,
+    safe_date,
 )
 
 
@@ -65,6 +73,10 @@ def write_dicom(
     modality: str = "MR",
     sequence_name: str | None = "tse",
     philips_private_pulse_sequence_name: str | None = None,
+    acquisition_time: str | None = None,
+    study_time: str | None = None,
+    series_time: str | None = None,
+    study_uid: str | None = None,
 ) -> None:
     if sop_class_uid is None:
         sop_class_uid = {
@@ -84,12 +96,18 @@ def write_dicom(
     ds.SOPClassUID = sop_class_uid
     ds.SOPInstanceUID = sop_uid
     ds.SeriesInstanceUID = series_uid
-    ds.StudyInstanceUID = generate_uid()
+    ds.StudyInstanceUID = study_uid or generate_uid()
     ds.FrameOfReferenceUID = generate_uid()
     ds.Modality = modality
     ds.AcquisitionDate = acquisition_date
     ds.StudyDate = acquisition_date
     ds.SeriesDate = acquisition_date
+    if acquisition_time is not None:
+        ds.AcquisitionTime = acquisition_time
+    if study_time is not None:
+        ds.StudyTime = study_time
+    if series_time is not None:
+        ds.SeriesTime = series_time
     ds.SeriesNumber = series_number
     ds.InstanceNumber = instance_number
     if acquisition_number is not None:
@@ -170,6 +188,17 @@ def write_dicom(
         ).encode()
         ds.add_new((0x0021, 0x1019), "OB", protocol)
     ds.save_as(path, enforce_file_format=True)
+
+
+def find_study_dir(output_root: Path, date: str = "20260515", device: str | None = None) -> Path:
+    if device:
+        p = output_root / device / date
+        if p.exists():
+            return p
+    matches = sorted(output_root.glob(f"*/{date}"))
+    if matches:
+        return matches[0]
+    return output_root / (device or "UnitTest_Synthetic") / date
 
 
 def args_for(input_root: Path, output_root: Path, **overrides: object) -> argparse.Namespace:
@@ -359,7 +388,7 @@ def test_run_writes_files_and_metadata(tmp_path: Path) -> None:
     assert result.summary["organized_files"] == 2
     assert result.summary["series_count"] == 2
     assert (output_root / "organize_summary.json").exists()
-    date_dir = output_root / "20260515"
+    date_dir = find_study_dir(output_root)
     assert (date_dir / "dicom_parameters.csv").exists()
     assert (date_dir / "series_summary.csv").exists()
 
@@ -420,7 +449,7 @@ def test_series_summary_columns_and_aggregates_share_parameter_rows(tmp_path: Pa
 
     run(args_for(input_root, output_root))
 
-    date_dir = output_root / "20260515"
+    date_dir = find_study_dir(output_root)
     with (date_dir / "dicom_parameters.csv").open(
         encoding="utf-8-sig",
         newline="",
@@ -437,6 +466,8 @@ def test_series_summary_columns_and_aggregates_share_parameter_rows(tmp_path: Pa
         summary_columns = set(summary_reader.fieldnames or [])
 
     assert summary_columns <= parameter_columns
+    assert "SeriesUIDHash" not in parameter_columns
+    assert "SeriesUIDHash" not in summary_columns
     assert {
         "OrganizedFileName",
         "SOPInstanceUID",
@@ -448,7 +479,6 @@ def test_series_summary_columns_and_aggregates_share_parameter_rows(tmp_path: Pa
     assert {row["TE_ms"] for row in parameter_rows} == {"10.0", "20.0"}
     assert summary_row["TE_ms"] == "10.0|20.0"
     for row in parameter_rows:
-        assert row["SeriesUIDHash"] == summary_row["SeriesUIDHash"]
         assert row["FileCount"] == summary_row["FileCount"] == "2"
         assert row["EchoCount"] == summary_row["EchoCount"] == "2"
         assert row["EchoTimes_ms"] == summary_row["EchoTimes_ms"] == "10.0|20.0"
@@ -508,7 +538,7 @@ def test_siemens_patient_phase_encoding_direction_for_cardinal_planes(
 
     run(args_for(input_root, output_root))
 
-    date_dir = output_root / "20260515"
+    date_dir = find_study_dir(output_root)
     with (date_dir / "dicom_parameters.csv").open(
         encoding="utf-8-sig",
         newline="",
@@ -544,7 +574,7 @@ def test_siemens_parallel_reduction_factor_is_written_to_both_csvs(tmp_path: Pat
 
     run(args_for(input_root, output_root))
 
-    date_dir = output_root / "20260515"
+    date_dir = find_study_dir(output_root)
     for csv_name in ("dicom_parameters.csv", "series_summary.csv"):
         with (date_dir / csv_name).open(encoding="utf-8-sig", newline="") as handle:
             row = next(csv.DictReader(handle))
@@ -569,7 +599,7 @@ def test_siemens_private_parallel_reduction_factor_fallback_is_written(
 
     run(args_for(input_root, output_root))
 
-    date_dir = output_root / "20260515"
+    date_dir = find_study_dir(output_root)
     for csv_name in ("dicom_parameters.csv", "series_summary.csv"):
         with (date_dir / csv_name).open(encoding="utf-8-sig", newline="") as handle:
             row = next(csv.DictReader(handle))
@@ -615,7 +645,7 @@ def test_patient_phase_encoding_direction_is_na_when_not_derivable(
 
     run(args_for(input_root, output_root))
 
-    with (output_root / "20260515" / "dicom_parameters.csv").open(
+    with (find_study_dir(output_root) / "dicom_parameters.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:
@@ -668,7 +698,8 @@ def test_metadata_tables_exclude_non_image_objects(tmp_path: Path) -> None:
 
     run(args_for(input_root, output_root))
 
-    with (output_root / "20260515" / "dicom_parameters.csv").open(
+    study_dir = find_study_dir(output_root)
+    with (study_dir / "dicom_parameters.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:
@@ -676,7 +707,7 @@ def test_metadata_tables_exclude_non_image_objects(tmp_path: Path) -> None:
     assert len(metadata_rows) == 1
     assert metadata_rows[0]["SOPClassUID"] == str(MRImageStorage)
 
-    with (output_root / "20260515" / "series_summary.csv").open(
+    with (study_dir / "series_summary.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:
@@ -702,7 +733,7 @@ def test_philips_sequence_name_falls_back_to_private_sequence(tmp_path: Path) ->
 
     run(args_for(input_root, output_root))
 
-    with (output_root / "20260515" / "dicom_parameters.csv").open(
+    with (find_study_dir(output_root) / "dicom_parameters.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:
@@ -733,7 +764,8 @@ def test_auto_profile_writes_mixed_modality_union_csv(tmp_path: Path) -> None:
 
     run(args_for(input_root, output_root, profile="auto"))
 
-    with (output_root / "20260515" / "dicom_parameters.csv").open(
+    study_dir = find_study_dir(output_root)
+    with (study_dir / "dicom_parameters.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:
@@ -749,7 +781,7 @@ def test_auto_profile_writes_mixed_modality_union_csv(tmp_path: Path) -> None:
     assert ct_row["KVP_kV"] == "120.0"
     assert ct_row["TE_ms"] == "N/A"
 
-    with (output_root / "20260515" / "series_summary.csv").open(
+    with (study_dir / "series_summary.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:
@@ -780,7 +812,7 @@ def test_auto_profile_writes_all_supported_modality_union_and_summary(
 
     run(args_for(input_root, output_root, profile="auto"))
 
-    with (output_root / "20260515" / "dicom_parameters.csv").open(
+    with (find_study_dir(output_root) / "dicom_parameters.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:
@@ -844,7 +876,8 @@ def test_generic_profile_uses_common_columns_only(tmp_path: Path) -> None:
 
     run(args_for(input_root, output_root, profile="generic"))
 
-    with (output_root / "20260515" / "dicom_parameters.csv").open(
+    study_dir = find_study_dir(output_root)
+    with (study_dir / "dicom_parameters.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:
@@ -856,7 +889,7 @@ def test_generic_profile_uses_common_columns_only(tmp_path: Path) -> None:
     assert "KVP_kV" not in fieldnames
     assert "Modality" in fieldnames
 
-    with (output_root / "20260515" / "series_summary.csv").open(
+    with (study_dir / "series_summary.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:
@@ -900,7 +933,8 @@ def test_ct_profile_filters_to_ct_image_rows(tmp_path: Path) -> None:
 
     run(args_for(input_root, output_root, profile="ct"))
 
-    with (output_root / "20260515" / "dicom_parameters.csv").open(
+    study_dir = find_study_dir(output_root)
+    with (study_dir / "dicom_parameters.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:
@@ -909,7 +943,7 @@ def test_ct_profile_filters_to_ct_image_rows(tmp_path: Path) -> None:
     assert rows[0]["Modality"] == "CT"
     assert rows[0]["SOPClassUID"] == str(CTImageStorage)
 
-    with (output_root / "20260515" / "series_summary.csv").open(
+    with (study_dir / "series_summary.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:
@@ -1035,7 +1069,7 @@ def test_non_mr_profiles_write_supported_metadata(
 
     run(args_for(input_root, output_root, profile=profile))
 
-    with (output_root / "20260515" / "dicom_parameters.csv").open(
+    with (find_study_dir(output_root) / "dicom_parameters.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:
@@ -1061,7 +1095,7 @@ def test_default_series_directory_uses_protocol_name(tmp_path: Path) -> None:
 
     assert result.items[0].destination.parent.name == "000003_T2-TSE-axial-fast"
     assert result.items[0].row["OrganizedFileName"].startswith(
-        "20260515/000003_T2-TSE-axial-fast/"
+        "UnitTest_Synthetic/20260515/000003_T2-TSE-axial-fast/"
     )
 
 
@@ -1113,6 +1147,7 @@ def test_philips_numeric_series_label_inherits_anchor_name(tmp_path: Path) -> No
     input_root = tmp_path / "input"
     output_root = tmp_path / "organized"
     input_root.mkdir()
+    study_uid = generate_uid()
     write_dicom(
         input_root / "anchor.dcm",
         series_uid=generate_uid(),
@@ -1124,6 +1159,7 @@ def test_philips_numeric_series_label_inherits_anchor_name(tmp_path: Path) -> No
         series_description="T2W Echose 30*32.",
         protocol_name="WIP T2W Echose 30*32.",
         image_type=("ORIGINAL", "PRIMARY", "M_SE", "M", "SE"),
+        study_uid=study_uid,
     )
     write_dicom(
         input_root / "numeric.dcm",
@@ -1136,6 +1172,7 @@ def test_philips_numeric_series_label_inherits_anchor_name(tmp_path: Path) -> No
         series_description="2",
         protocol_name="WIP 2",
         image_type=("ORIGINAL", "PRIMARY", "M_SE", "M", "SE"),
+        study_uid=study_uid,
     )
 
     result = run(args_for(input_root, output_root))
@@ -1206,7 +1243,7 @@ def test_philips_series_splits_reconstructions_by_image_type(tmp_path: Path) -> 
     assert parents.count("000010_B1-fast-named-by-operator_PHASE-MAP-B1") == 1
     assert result.summary["series_count"] == 2
 
-    with (output_root / "20260515" / "series_summary.csv").open(
+    with (find_study_dir(output_root) / "series_summary.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:
@@ -1327,7 +1364,7 @@ def test_patient_mode_keep_hash_and_drop(tmp_path: Path) -> None:
 
     keep_output = tmp_path / "keep"
     run(args_for(input_root, keep_output, patient_mode="keep"))
-    with (keep_output / "20260515" / "dicom_parameters.csv").open(
+    with (find_study_dir(keep_output) / "dicom_parameters.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:
@@ -1339,7 +1376,7 @@ def test_patient_mode_keep_hash_and_drop(tmp_path: Path) -> None:
 
     hash_output = tmp_path / "hash"
     run(args_for(input_root, hash_output, patient_mode="hash"))
-    with (hash_output / "20260515" / "dicom_parameters.csv").open(
+    with (find_study_dir(hash_output) / "dicom_parameters.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:
@@ -1351,7 +1388,7 @@ def test_patient_mode_keep_hash_and_drop(tmp_path: Path) -> None:
 
     drop_output = tmp_path / "drop"
     run(args_for(input_root, drop_output, patient_mode="drop"))
-    with (drop_output / "20260515" / "dicom_parameters.csv").open(
+    with (find_study_dir(drop_output) / "dicom_parameters.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:
@@ -1388,7 +1425,8 @@ def test_custom_dicom_tags_are_written_to_metadata_csv(tmp_path: Path) -> None:
         )
     )
 
-    with (output_root / "20260515" / "dicom_parameters.csv").open(
+    study_dir = find_study_dir(output_root)
+    with (study_dir / "dicom_parameters.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:
@@ -1400,7 +1438,7 @@ def test_custom_dicom_tags_are_written_to_metadata_csv(tmp_path: Path) -> None:
     assert row["DICOM_InPlanePhaseEncodingDirection"] == "ROW"
     assert row["PrivateMissing"] == "N/A"
 
-    with (output_root / "20260515" / "series_summary.csv").open(
+    with (study_dir / "series_summary.csv").open(
         encoding="utf-8-sig",
         newline="",
     ) as handle:
@@ -1519,7 +1557,7 @@ def test_cli_accepts_common_short_options(tmp_path: Path) -> None:
     assert args.force_read is True
     assert args.limit == 3
     assert args.profile == "ct"
-    assert args.dicom_tag == ["EchoTime"]
+    assert args.dicom_tags == ["EchoTime"]
     assert args.verbose is True
 
 
@@ -1546,3 +1584,425 @@ def test_cli_version_prints_package_version() -> None:
     )
     assert result.returncode == 0
     assert result.stdout.strip().startswith("dicom-organizer ")
+
+
+def test_format_dicom_time() -> None:
+    assert format_dicom_time("190429.500000") == "19:04:29.5"
+    assert format_dicom_time("190410.990000") == "19:04:10.99"
+    assert format_dicom_time("182752.265186") == "18:27:52.265186"
+    assert format_dicom_time("120000.000") == "12:00:00"
+    assert format_dicom_time("120000") == "12:00:00"
+    assert format_dicom_time("093015") == "09:30:15"
+    assert format_dicom_time("93015") == "09:30:15"
+    assert format_dicom_time("1430") == "14:30:00"
+    assert format_dicom_time("19:04:29.5") == "19:04:29.5"
+    assert format_dicom_time(None) == "N/A"
+    assert format_dicom_time("") == "N/A"
+    assert format_dicom_time("N/A") == "N/A"
+    assert format_dicom_time("invalid") == "invalid"
+    assert format_dicom_time("999999") == "999999"
+
+
+def test_csv_formats_time_fields(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+
+    series_uid = generate_uid()
+    write_dicom(
+        input_root / "img1.dcm",
+        series_uid=series_uid,
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        acquisition_time="190429.500000",
+        study_time="182752.265186",
+        series_time="190410.990000",
+    )
+
+    run(args_for(input_root, output_root))
+
+    date_dir = find_study_dir(output_root)
+    with (date_dir / "dicom_parameters.csv").open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1
+    assert rows[0]["AcquisitionTime"] == "19:04:29.5"
+    assert rows[0]["StudyTime"] == "18:27:52.265186"
+    assert rows[0]["SeriesTime"] == "19:04:10.99"
+
+    with (date_dir / "series_summary.csv").open(encoding="utf-8-sig", newline="") as handle:
+        summary_rows = list(csv.DictReader(handle))
+    assert len(summary_rows) == 1
+    assert summary_rows[0]["AcquisitionTime"] == "19:04:29.5"
+    assert summary_rows[0]["StudyTime"] == "18:27:52.265186"
+    assert summary_rows[0]["SeriesTime"] == "19:04:10.99"
+
+
+def test_device_and_study_date_hierarchy(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+
+    # Create two series from same study spanning midnight (StudyDate 20260718, but series 2 has AcquisitionDate 20260719)
+    study_uid = generate_uid()
+    write_dicom(
+        input_root / "s1.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        manufacturer="GE MEDICAL SYSTEMS",
+        acquisition_date="20260718",
+    )
+    # Give it specific model name
+    ds1 = pydicom.dcmread(input_root / "s1.dcm")
+    ds1.ManufacturerModelName = "SIGNA Architect"
+    ds1.StudyInstanceUID = study_uid
+    ds1.StudyDate = "20260718"
+    ds1.save_as(input_root / "s1.dcm")
+
+    write_dicom(
+        input_root / "s2.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=2,
+        instance_number=1,
+        manufacturer="GE MEDICAL SYSTEMS",
+        acquisition_date="20260719",  # Next day acquisition
+    )
+    ds2 = pydicom.dcmread(input_root / "s2.dcm")
+    ds2.ManufacturerModelName = "SIGNA Architect"
+    ds2.StudyInstanceUID = study_uid
+    ds2.StudyDate = "20260718"  # Same study date
+    ds2.save_as(input_root / "s2.dcm")
+
+    run(args_for(input_root, output_root))
+
+    # Expect folder: output_root / "GE_SIGNA-Architect" / "20260718"
+    expected_study_dir = output_root / "GE_SIGNA-Architect" / "20260718"
+    assert expected_study_dir.exists()
+    assert (expected_study_dir / "dicom_parameters.csv").exists()
+    assert (expected_study_dir / "series_summary.csv").exists()
+
+    with (expected_study_dir / "series_summary.csv").open(encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        fieldnames = reader.fieldnames or []
+
+    # Both series must be in the same StudyDate folder (midnight span resolved!)
+    assert len(rows) == 2
+    assert {row["SeriesNumber"] for row in rows} == {"000001", "000002"}
+    # Verify SeriesUIDHash is not in CSV
+    assert "SeriesUIDHash" not in fieldnames
+
+
+def test_ensure_within_output_root_rejects_escape(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    with pytest.raises(ValueError, match="Output path escapes the output root"):
+        ensure_within_output_root(root, root / ".." / "x")
+
+
+def test_safe_date_validation() -> None:
+    assert safe_date("20260515") == "20260515"
+    assert safe_date("2026-05-15") == "20260515"
+    assert safe_date("invalid") == "unknown_date"
+    assert safe_date("../../escaped") == "unknown_date"
+    assert safe_date("20260230") == "unknown_date"
+
+
+def test_invalid_study_date_is_sanitized(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    dcm_path = input_root / "one.dcm"
+    write_dicom(
+        dcm_path,
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+    )
+    ds = pydicom.dcmread(dcm_path)
+    ds.StudyDate = "../../escaped"
+    ds.save_as(dcm_path)
+
+    result = run(args_for(input_root, output_root))
+
+    assert len(result.items) == 1
+    dest = result.items[0].destination
+    assert dest.resolve().is_relative_to(output_root.resolve())
+    assert dest.parent.parent.name == "unknown_date"
+    assert not (output_root.parent / "escaped").exists()
+
+    # CSV preserves the raw value
+    study_dir = dest.parent.parent
+    with (study_dir / "dicom_parameters.csv").open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1
+    assert rows[0]["StudyDate"] == "../../escaped"
+
+
+def test_series_dir_suffix_does_not_collide_with_existing_label(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+
+    for name, label in (("a.dcm", "A"), ("b.dcm", "A"), ("c.dcm", "A_01")):
+        write_dicom(
+            input_root / name,
+            series_uid=generate_uid(),
+            sop_uid=generate_uid(),
+            series_number=1,
+            instance_number=1,
+            protocol_name=label,
+        )
+
+    result = run(args_for(input_root, output_root))
+    dirs = [item.destination.parent for item in result.items]
+    counts = {d: len(list(d.glob("*.dcm"))) for d in set(dirs)}
+
+    assert len(set(dirs)) == 3
+    assert all(count == 1 for count in counts.values())
+    assert result.summary["series_count"] == 3
+
+
+def test_materialize_failure_keeps_previous_output(tmp_path: Path) -> None:
+    root = tmp_path / "atomic"
+    root.mkdir()
+    dest = root / "dest.dcm"
+    dest.write_text("previous output")
+    with pytest.raises(Exception):
+        materialize(root / "missing.dcm", dest, action="copy", overwrite=True)
+    assert dest.exists()
+    assert dest.read_text() == "previous output"
+    assert [p.name for p in root.iterdir() if p.name != "dest.dcm"] == []
+
+
+def test_move_keeps_source_when_copy_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = tmp_path / "src.txt"
+    dest = tmp_path / "dest.txt"
+    src.write_text("source content")
+
+    def fake_replace(s: Path, d: Path) -> None:
+        err = OSError()
+        err.errno = errno.EXDEV
+        raise err
+
+    monkeypatch.setattr("dicom_organizer.core.os.replace", fake_replace)
+
+    def fake_copy2(s: Path, d: Path) -> None:
+        raise OSError("copy failed")
+
+    monkeypatch.setattr("dicom_organizer.core.shutil.copy2", fake_copy2)
+
+    with pytest.raises(OSError, match="copy failed"):
+        materialize(src, dest, action="move", overwrite=False)
+
+    assert src.exists()
+    assert src.read_text() == "source content"
+    assert not dest.exists()
+    assert list(tmp_path.glob(".*.tmp")) == []
+
+
+def test_materialize_move_success(tmp_path: Path) -> None:
+    src = tmp_path / "src.txt"
+    dest = tmp_path / "dest.txt"
+    src.write_text("move content")
+    materialize(src, dest, action="move", overwrite=False)
+    assert not src.exists()
+    assert dest.exists()
+    assert dest.read_text() == "move content"
+
+
+def test_skip_rerun_keeps_existing_rows_in_csv(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    series_uid = generate_uid()
+
+    write_dicom(
+        input_root / "one.dcm",
+        series_uid=series_uid,
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+    )
+    run(args_for(input_root, output_root))
+
+    write_dicom(
+        input_root / "two.dcm",
+        series_uid=series_uid,
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=2,
+    )
+    run(args_for(input_root, output_root, if_exists="skip"))
+
+    study_dir = find_study_dir(output_root)
+    with (study_dir / "dicom_parameters.csv").open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 2
+    assert {row["FileCount"] for row in rows} == {"2"}
+
+    with (study_dir / "series_summary.csv").open(encoding="utf-8-sig", newline="") as handle:
+        summary_rows = list(csv.DictReader(handle))
+    assert len(summary_rows) == 1
+    assert summary_rows[0]["FileCount"] == "2"
+
+
+def test_metadata_csv_drops_rows_for_missing_files(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    series_uid = generate_uid()
+
+    write_dicom(
+        input_root / "one.dcm",
+        series_uid=series_uid,
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+    )
+    write_dicom(
+        input_root / "two.dcm",
+        series_uid=series_uid,
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=2,
+    )
+    run(args_for(input_root, output_root))
+
+    # 手で one.dcm の入出力を削除する
+    (input_root / "one.dcm").unlink()
+    study_dir = find_study_dir(output_root)
+    dcm_files = sorted(study_dir.rglob("*.dcm"))
+    assert len(dcm_files) == 2
+    dcm_files[0].unlink()
+
+    # 別ファイル three.dcm を追加して再実行
+    write_dicom(
+        input_root / "three.dcm",
+        series_uid=series_uid,
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=3,
+    )
+    run(args_for(input_root, output_root, if_exists="skip"))
+
+    with (study_dir / "dicom_parameters.csv").open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 2
+    assert {row["InstanceNumber"] for row in rows} == {"2", "3"}
+    assert {row["FileCount"] for row in rows} == {"2"}
+
+
+def test_cli_dicom_tag_option_reaches_metadata_csv(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "one.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        echo_time=12.5,
+    )
+    args = parse_args([str(input_root), "-o", str(output_root), "-t", "EchoTime"])
+    run(args)
+
+    study_dir = find_study_dir(output_root)
+    with (study_dir / "dicom_parameters.csv").open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1
+    assert "DICOM_EchoTime" in rows[0]
+    assert rows[0]["DICOM_EchoTime"] == "12.5"
+
+    with (study_dir / "series_summary.csv").open(encoding="utf-8-sig", newline="") as handle:
+        summary_rows = list(csv.DictReader(handle))
+    assert len(summary_rows) == 1
+    assert "DICOM_EchoTime" in summary_rows[0]
+    assert summary_rows[0]["DICOM_EchoTime"] == "12.5"
+
+
+def test_options_paths_are_resolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    options = OrganizeOptions(input_root=Path("input"), output_root=Path("organized"))
+    normalized = normalize_options(options)
+    assert normalized.input_root.is_absolute()
+    assert normalized.output_root.is_absolute()
+    assert normalized.input_root == (tmp_path / "input").resolve()
+    assert normalized.output_root == (tmp_path / "organized").resolve()
+
+
+def test_relative_options_produce_valid_symlinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    inp = Path("input")
+    inp.mkdir()
+    target = inp / "a.dcm"
+    write_dicom(
+        target,
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+    )
+    result = run(
+        OrganizeOptions(input_root=Path("input"), output_root=Path("organized"), action="symlink")
+    )
+    dest = result.items[0].destination
+    assert dest.exists()
+    assert dest.is_symlink()
+    link_target = dest.readlink()
+    assert link_target.is_absolute()
+
+
+def test_philips_anchor_label_is_scoped_to_study(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "organized"
+    input_root.mkdir()
+
+    write_dicom(
+        input_root / "a1.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        manufacturer="Philips Medical Systems",
+        series_description="Brain",
+        acquisition_number=3,
+        image_type=("ORIGINAL", "PRIMARY", "M", "FFE"),
+        acquisition_date="20260515",
+        study_uid=generate_uid(),
+    )
+    write_dicom(
+        input_root / "b1.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=2,
+        instance_number=1,
+        manufacturer="Philips Medical Systems",
+        series_description="123",
+        acquisition_number=3,
+        image_type=("ORIGINAL", "PRIMARY", "M", "FFE"),
+        acquisition_date="20260515",
+        study_uid=generate_uid(),
+    )
+
+    result = run(args_for(input_root, output_root))
+    names = sorted(item.destination.parent.name for item in result.items)
+    numeric = [name for name in names if name.startswith("000002")]
+    assert len(numeric) == 1
+    assert "Brain" not in numeric[0]
+
+
+
+
+
+
+

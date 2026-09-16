@@ -4,10 +4,10 @@ This document describes the CSV files written by `dicom-organizer`.
 
 ## Files And Row Scope
 
-`dicom_parameters.csv` is written once per acquisition date. Each row represents
+`dicom_parameters.csv` is written once per study directory (`organized/<Device>/<StudyDate>/`). Each row represents
 one supported image DICOM object selected by the active metadata profile.
 
-`series_summary.csv` is also written once per acquisition date. Each row
+`series_summary.csv` is also written once per study directory. Each row
 summarizes one organized series folder after applying the same profile filter.
 
 The organizer first prepares the rows written to `dicom_parameters.csv`, adds
@@ -34,8 +34,9 @@ both total organized files and CSV target files, including modality-level counts
 
 `dicom_parameters.csv` starts with common columns for identifiers, series labels,
 dates and times, patient fields, geometry, manufacturer information, source
-filename, image type, and spatial orientation. Missing values are written as
-`N/A`.
+filename, image type, and spatial orientation. Time fields (`AcquisitionTime`,
+`SeriesTime`, `StudyTime`) are formatted as `HH:MM:SS[.fraction]` (for example,
+`19:04:29.5`). Missing values are written as `N/A`.
 
 Patient fields follow `--patient-mode`:
 
@@ -144,10 +145,10 @@ logs, CSV files, and `organize_summary.json` describe the same selection.
 
 ## ファイルと行の単位
 
-`dicom_parameters.csv` は acquisition date ごとに1つ作られます。各行は、現在の
+`dicom_parameters.csv` は検査ディレクトリ（`organized/<Device>/<StudyDate>/`）ごとに1つ作られます。各行は、現在の
 metadata profileで選択された対応画像DICOMオブジェクト1件を表します。
 
-`series_summary.csv` も acquisition date ごとに1つ作られます。各行は、同じprofile
+`series_summary.csv` も検査ディレクトリごとに1つ作られます。各行は、同じprofile
 filterを適用した後の整理済みseries folder 1件を要約します。
 
 最初に `dicom_parameters.csv` へ書くrowを準備し、そのrowへseries集計値を追加した後、
@@ -171,7 +172,8 @@ CSV表からは除外されます。実行summaryには、整理された総数�
 
 `dicom_parameters.csv` は、識別子、series label、日付・時刻、患者情報、幾何情報、
 メーカー情報、元ファイル名、image type、空間位置・方向の共通列から始まります。
-欠損値は `N/A` として出力されます。
+時刻列（`AcquisitionTime`、`SeriesTime`、`StudyTime`）は `HH:MM:SS[.fraction]` 形式
+（例: `19:04:29.5`）に整形されます。欠損値は `N/A` として出力されます。
 
 患者情報は `--patient-mode` に従います。
 

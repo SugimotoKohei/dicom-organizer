@@ -6,8 +6,18 @@ This project follows semantic versioning before public API stability is
 guaranteed. While the project is in `0.x`, CLI and CSV output changes may still
 occur, but they should be documented here.
 
-## 0.1.4 - Unreleased
+## 0.2.0 - Unreleased
 
+- Restructure default output folder hierarchy to `organized/<Device>/<StudyDate>/<SeriesNumber>_<SeriesFolderLabel>/`.
+- Remove `SeriesUIDHash` column from metadata CSVs.
+- Format DICOM time fields (`AcquisitionTime`, `SeriesTime`, `StudyTime`) as `HH:MM:SS[.fraction]`.
+- Sanitize `StudyDate` and verify all written paths stay strictly within `output_root` to prevent directory escape.
+- Ensure series directory names are unique across all series, reserving existing series names to prevent collisions.
+- Make file materialization atomic using temporary files and `os.replace` to prevent losing previous outputs on failure.
+- Preserve existing CSV rows on rerun with `--if-exists skip`, dropping rows only when output files no longer exist.
+- Wire CLI `-t/--dicom-tag/--tag` option to `dicom_tags` so custom tags reach metadata CSVs.
+- Resolve `input_root` and `output_root` in `OrganizeOptions` to absolute paths, ensuring valid symlinks with relative paths.
+- Scope Philips numeric series anchor label lookup to the same `StudyInstanceUID`.
 - Allow the input directory to be passed as a positional argument, while keeping
   `-i` and `--input` for compatibility.
 - Add common short CLI options for output, profile, dry-run, force-read, limit,

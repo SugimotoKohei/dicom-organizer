@@ -77,11 +77,14 @@ available.
 Output:
 
 ```text
-organized/<AcquisitionDate>/<SeriesNumber>_<SeriesFolderLabel>/000001.dcm
-organized/<AcquisitionDate>/dicom_parameters.csv
-organized/<AcquisitionDate>/series_summary.csv
+organized/<Device>/<StudyDate>/<SeriesNumber>_<SeriesFolderLabel>/000001.dcm
+organized/<Device>/<StudyDate>/dicom_parameters.csv
+organized/<Device>/<StudyDate>/series_summary.csv
 organized/organize_summary.json
 ```
+
+The date used for folder hierarchy is `StudyDate` (while `AcquisitionDate` remains available as a CSV column and template key); invalid or missing dates fall back to `unknown_date`.
+When re-running into an existing output folder (e.g. with `--if-exists skip`), metadata CSVs are reconstructed across the entire output directory including existing outputs, whereas `organize_summary.json` records the log for that specific run.
 
 `dicom_parameters.csv` and `series_summary.csv` focus on supported image objects.
 Presentation states and vendor-private helper objects may still be organized into
@@ -247,11 +250,14 @@ Philips で同じ `SeriesInstanceUID` に複数の再構成が含まれる場合
 出力:
 
 ```text
-organized/<AcquisitionDate>/<SeriesNumber>_<SeriesFolderLabel>/000001.dcm
-organized/<AcquisitionDate>/dicom_parameters.csv
-organized/<AcquisitionDate>/series_summary.csv
+organized/<Device>/<StudyDate>/<SeriesNumber>_<SeriesFolderLabel>/000001.dcm
+organized/<Device>/<StudyDate>/dicom_parameters.csv
+organized/<Device>/<StudyDate>/series_summary.csv
 organized/organize_summary.json
 ```
+
+フォルダ階層の日付には `StudyDate` を採用しています（`AcquisitionDate` は CSV 列およびテンプレートキーとして残ります）。日付が不正または欠損している場合は `unknown_date` になります。
+既存の出力フォルダに対して再実行（`--if-exists skip` など）した場合、メタデータ CSV は既存出力を含む出力ディレクトリ全体で再構築されます。一方、`organize_summary.json` はその実行のログを記録します。
 
 `dicom_parameters.csv` と `series_summary.csv` は対応している画像オブジェクトを
 対象にしています。プレゼンテーションステートやベンダー独自の補助オブジェクトも

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Organize DICOM files into stable series directories.
 
-The default output layout intentionally matches the older local organizer:
+The default output layout organizes files by device, study date, and series:
 
-    organized/<AcquisitionDate>/<SeriesNumber>_<SeriesFolderLabel>/
+    organized/<Device>/<StudyDate>/<SeriesNumber>_<SeriesFolderLabel>/
         000001.dcm
         ...
-    organized/<AcquisitionDate>/
+    organized/<Device>/<StudyDate>/
         dicom_parameters.csv
         series_summary.csv
     organized/organize_summary.json
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import errno
 import hashlib
 import importlib.metadata
 import json
@@ -27,6 +28,7 @@ import os
 import re
 import shutil
 import sys
+import uuid
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -50,7 +52,7 @@ from pydicom.uid import (
     XRayAngiographicImageStorage,
 )
 
-__version__ = "0.1.4"
+__version__ = "0.2.0"
 
 
 def package_version() -> str:
@@ -75,7 +77,6 @@ def merge_columns(*groups: list[str] | tuple[str, ...]) -> list[str]:
 COMMON_METADATA_COLUMNS = [
     "OrganizedFileName",
     "SeriesUID",
-    "SeriesUIDHash",
     "SOPInstanceUID",
     "SeriesNumber",
     "SeriesDescription",
@@ -194,7 +195,6 @@ COMMON_SUMMARY_COLUMNS = merge_columns(
         "AcquisitionDate",
         "SeriesNumber",
         "SeriesUID",
-        "SeriesUIDHash",
         "Modality",
         "SeriesDescription",
         "ProtocolName",
@@ -363,7 +363,7 @@ class OrganizeResult:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Organize DICOM files by AcquisitionDate and SeriesInstanceUID."
+        description="Organize DICOM files by device, StudyDate, and SeriesInstanceUID."
     )
     parser.add_argument(
         "--version",
@@ -483,6 +483,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--dicom-tag",
         "--tag",
         action="append",
+        dest="dicom_tags",
         default=[],
         metavar="TAG",
         help=(
@@ -506,6 +507,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
+def resolved_root(value: Path | str) -> Path:
+    return Path(value).expanduser().resolve()
+
+
 def normalize_options(
     args: argparse.Namespace | OrganizeOptions,
     *,
@@ -513,12 +518,18 @@ def normalize_options(
     validate: bool = False,
 ) -> OrganizeOptions:
     if isinstance(args, OrganizeOptions):
-        options = replace(args, dry_run=dry_run) if dry_run is not None else args
+        overrides: dict[str, Any] = {
+            "input_root": resolved_root(args.input_root),
+            "output_root": resolved_root(args.output_root),
+        }
+        if dry_run is not None:
+            overrides["dry_run"] = dry_run
+        options = replace(args, **overrides)
     else:
-        input_root = Path(args.input).expanduser().resolve()
+        input_root = resolved_root(args.input)
         output_value = getattr(args, "output", None)
         output_root = (
-            Path(output_value).expanduser().resolve()
+            resolved_root(output_value)
             if output_value
             else input_root / "organized"
         )
@@ -653,6 +664,42 @@ def text_value(value: Any, default: str = "N/A") -> str:
     return str(value)
 
 
+def format_dicom_time(value: Any, default: str = "N/A") -> str:
+    """Format DICOM TM value (e.g. '190429.500000') as 'HH:MM:SS[.fraction]'."""
+    if value is None:
+        return default
+    text = str(value).strip()
+    if not text or text == default:
+        return default
+    if ":" in text:
+        return text
+
+    parts = text.split(".", 1)
+    time_digits = re.sub(r"\D", "", parts[0])
+    if len(time_digits) in (1, 3, 5):
+        time_digits = f"0{time_digits}"
+    if len(time_digits) < 2:
+        return text
+
+    hh = time_digits[0:2]
+    mm = time_digits[2:4] if len(time_digits) >= 4 else "00"
+    ss = time_digits[4:6] if len(time_digits) >= 6 else "00"
+
+    try:
+        if not (0 <= int(hh) <= 23 and 0 <= int(mm) <= 59 and 0 <= int(ss) <= 60):
+            return text
+    except ValueError:
+        return text
+
+    formatted = f"{hh}:{mm}:{ss}"
+    if len(parts) > 1:
+        fraction = re.sub(r"\D", "", parts[1]).rstrip("0")
+        if fraction:
+            formatted = f"{formatted}.{fraction}"
+
+    return formatted
+
+
 def ds_value(ds: pydicom.dataset.Dataset, name: str, default: str = "N/A") -> str:
     return text_value(getattr(ds, name, None), default=default)
 
@@ -749,6 +796,63 @@ def safe_name(value: str, fallback: str = "NA") -> str:
     return cleaned or fallback
 
 
+def safe_date(value: str, fallback: str = "unknown_date") -> str:
+    """Return a YYYYMMDD folder-safe date, or the fallback when it is not a valid date."""
+    text = str(value).strip()
+    digits = re.sub(r"\D", "", text)
+    if len(digits) != 8:
+        return fallback
+    try:
+        datetime.strptime(digits, "%Y%m%d")
+    except ValueError:
+        return fallback
+    return digits
+
+
+def ensure_within_output_root(output_root: Path, path: Path) -> Path:
+    """Return path unchanged after verifying that it stays inside output_root."""
+    root = output_root.resolve()
+    candidate = path if path.is_absolute() else output_root / path
+    if not candidate.resolve().is_relative_to(root):
+        raise ValueError(f"Output path escapes the output root: {candidate}")
+    return candidate
+
+
+def normalize_vendor_name(manufacturer: str) -> str:
+    cleaned = manufacturer.strip()
+    if not cleaned or cleaned == "N/A":
+        return ""
+    m = cleaned.casefold()
+    if "ge" in m:
+        return "GE"
+    if "siemens" in m:
+        return "Siemens"
+    if "philips" in m:
+        return "Philips"
+    if "canon" in m:
+        return "Canon"
+    if "toshiba" in m:
+        return "Toshiba"
+    if "hitachi" in m:
+        return "Hitachi"
+    if "fujifilm" in m or "fuji" in m:
+        return "Fujifilm"
+    return safe_name(cleaned, fallback="UnknownVendor")
+
+
+def device_folder_name(manufacturer: str, model_name: str) -> str:
+    vendor = normalize_vendor_name(manufacturer)
+    cleaned_model = model_name.strip() if model_name and model_name != "N/A" else ""
+    model = safe_name(cleaned_model, fallback="") if cleaned_model else ""
+    if vendor and model:
+        return f"{vendor}_{model}"
+    if model:
+        return model
+    if vendor:
+        return vendor
+    return "UnknownDevice"
+
+
 def series_number(ds: pydicom.dataset.Dataset) -> str:
     raw = ds_value(ds, "SeriesNumber", default="0")
     try:
@@ -832,17 +936,20 @@ def dominant_philips_reconstruction(contexts: list[dict[str, Any]]) -> tuple[str
 
 
 def resolved_series_assignments(
-    pending: list[tuple[Path, dict[str, Any], str, tuple[str, str]]],
-) -> list[tuple[tuple[str, str, tuple[str, ...]], dict[str, str]]]:
-    assignments: list[tuple[tuple[str, str, tuple[str, ...]], dict[str, str]]] = [
-        (("", "", ()), {}) for _ in pending
+    pending: list[tuple[Path, dict[str, Any], str, tuple[Any, ...]]],
+) -> list[tuple[tuple[Any, ...], dict[str, str]]]:
+    assignments: list[tuple[tuple[Any, ...], dict[str, str]]] = [
+        ((), {}) for _ in pending
     ]
-    indices_by_series: dict[tuple[str, str], list[int]] = defaultdict(list)
-    anchor_labels: dict[tuple[str, str, tuple[str, ...]], str] = {}
+    indices_by_series: dict[tuple[Any, ...], list[int]] = defaultdict(list)
+    anchor_labels: dict[tuple[str, str, str, tuple[str, ...]], str] = {}
 
-    anchor_candidates: dict[tuple[str, str, tuple[str, ...]], set[str]] = defaultdict(set)
+    anchor_candidates: dict[tuple[str, str, str, tuple[str, ...]], set[str]] = defaultdict(set)
     for _source, context, _filename, _base_series_key in pending:
         if not context["is_philips_mr"]:
+            continue
+        study_instance_uid = context.get("study_instance_uid", "")
+        if not study_instance_uid or study_instance_uid == "N/A":
             continue
         acquisition_number = context["acquisition_number"]
         if not acquisition_number or acquisition_number == "N/A":
@@ -850,7 +957,8 @@ def resolved_series_assignments(
         if is_numeric_series_label(context["raw_series_label"]):
             continue
         key = (
-            context["acquisition_date"],
+            study_instance_uid,
+            context["study_date"],
             acquisition_number,
             tuple(context["philips_image_type"]),
         )
@@ -875,14 +983,17 @@ def resolved_series_assignments(
             reconstruction_name = ""
             series_label = context["series_label"]
             if context["is_philips_mr"] and is_numeric_series_label(context["raw_series_label"]):
-                anchor_key = (
-                    context["acquisition_date"],
-                    context["acquisition_number"],
-                    tuple(context["philips_image_type"]),
-                )
-                anchor_label = anchor_labels.get(anchor_key)
-                if anchor_label:
-                    series_label = safe_name(f"{anchor_label}_{series_label}")
+                study_instance_uid = context.get("study_instance_uid", "")
+                if study_instance_uid and study_instance_uid != "N/A":
+                    anchor_key = (
+                        study_instance_uid,
+                        context["study_date"],
+                        context["acquisition_number"],
+                        tuple(context["philips_image_type"]),
+                    )
+                    anchor_label = anchor_labels.get(anchor_key)
+                    if anchor_label:
+                        series_label = safe_name(f"{anchor_label}_{series_label}")
             if split_series:
                 effective_reconstruction = tuple(context["philips_image_type"]) or dominant_reconstruction
                 reconstruction_name = reconstruction_label(effective_reconstruction)
@@ -890,7 +1001,7 @@ def resolved_series_assignments(
             if reconstruction_name:
                 series_folder_label = f"{series_folder_label}_{reconstruction_name}"
             assignments[index] = (
-                (base_series_key[0], base_series_key[1], effective_reconstruction),
+                (*base_series_key, effective_reconstruction),
                 {
                     "series_label": series_label,
                     "reconstruction_label": reconstruction_name,
@@ -1188,7 +1299,6 @@ def file_context(
 
     row = {
         "SeriesUID": series_uid,
-        "SeriesUIDHash": series_uid_hash,
         "SOPInstanceUID": sop_uid,
         "SeriesNumber": series_number(ds),
         "SeriesDescription": series_description,
@@ -1199,7 +1309,7 @@ def file_context(
             "AcquisitionDate",
             default=ds_value(ds, "StudyDate", default="unknown_date"),
         ),
-        "AcquisitionTime": ds_value(ds, "AcquisitionTime"),
+        "AcquisitionTime": format_dicom_time(ds_value(ds, "AcquisitionTime")),
         "PatientName": patient_name,
         "Modality": ds_value(ds, "Modality"),
         "TR_ms": ds_value(ds, "RepetitionTime"),
@@ -1247,9 +1357,9 @@ def file_context(
         "FrameOfReferenceUID": ds_value(ds, "FrameOfReferenceUID"),
         "StudyInstanceUID": ds_value(ds, "StudyInstanceUID"),
         "StudyDate": ds_value(ds, "StudyDate"),
-        "StudyTime": ds_value(ds, "StudyTime"),
+        "StudyTime": format_dicom_time(ds_value(ds, "StudyTime")),
         "SeriesDate": ds_value(ds, "SeriesDate"),
-        "SeriesTime": ds_value(ds, "SeriesTime"),
+        "SeriesTime": format_dicom_time(ds_value(ds, "SeriesTime")),
         "PatientID": patient_id,
         "PatientIDHash": patient_id_hash,
         "PatientNameHash": patient_hash,
@@ -1283,9 +1393,21 @@ def file_context(
     for spec in dicom_tag_specs:
         row[spec.column] = dicom_tag_value(ds, spec.tag)
 
+    study_date = safe_date(
+        ds_value(
+            ds, "StudyDate", default=ds_value(ds, "AcquisitionDate", default="unknown_date")
+        )
+    )
+    device_folder = device_folder_name(manufacturer, ds_value(ds, "ManufacturerModelName"))
+
     return {
-        "acquisition_date": ds_value(
-            ds, "AcquisitionDate", default=ds_value(ds, "StudyDate", default="unknown_date")
+        "study_instance_uid": ds_value(ds, "StudyInstanceUID", default=""),
+        "study_date": study_date,
+        "device_folder": device_folder,
+        "acquisition_date": safe_date(
+            ds_value(
+                ds, "AcquisitionDate", default=ds_value(ds, "StudyDate", default="unknown_date")
+            )
         ),
         "acquisition_number": ds_value(ds, "AcquisitionNumber", default=""),
         "series_uid": series_uid,
@@ -1409,64 +1531,63 @@ def suffixed_path(path: Path, seen: set[Path]) -> Path:
         index += 1
 
 
-def resolve_series_dir(
-    base_dir: Path,
-    series_key: tuple[str, str],
-    assigned_dirs: dict[tuple[str, str], Path],
-    used_dirs: set[Path],
-) -> Path:
-    if series_key in assigned_dirs:
-        return assigned_dirs[series_key]
-
-    candidate = unique_series_dir(base_dir, used_dirs)
-    assigned_dirs[series_key] = candidate
-    used_dirs.add(candidate)
-    return candidate
-
-
-def unique_series_dir(base_dir: Path, used_dirs: set[Path]) -> Path:
-    if base_dir not in used_dirs:
-        return base_dir
-
-    index = 2
-    while True:
-        candidate = base_dir.with_name(f"{base_dir.name}_{index:02d}")
-        if candidate not in used_dirs:
-            return candidate
-        index += 1
-
-
 def assign_series_dirs(
-    base_dir_by_series: dict[tuple[str, str, tuple[str, ...]], Path],
-    series_order: list[tuple[str, str, tuple[str, ...]]],
-) -> dict[tuple[str, str, tuple[str, ...]], Path]:
-    series_by_base_dir: dict[Path, list[tuple[str, str, tuple[str, ...]]]] = defaultdict(list)
+    base_dir_by_series: dict[Any, Path],
+    series_order: list[Any],
+) -> dict[Any, Path]:
+    reserved = set(base_dir_by_series.values())  # Do not steal original names of other series
+    counts = Counter(base_dir_by_series[key] for key in series_order)
+    used: set[Path] = set()
+    assigned: dict[Any, Path] = {}
     for series_key in series_order:
-        series_by_base_dir[base_dir_by_series[series_key]].append(series_key)
-
-    assigned: dict[tuple[str, str, tuple[str, ...]], Path] = {}
-    for base_dir, series_keys in series_by_base_dir.items():
-        if len(series_keys) == 1:
-            assigned[series_keys[0]] = base_dir
+        base_dir = base_dir_by_series[series_key]
+        if counts[base_dir] == 1 and base_dir not in used:
+            assigned[series_key] = base_dir
+            used.add(base_dir)
             continue
-        for index, series_key in enumerate(series_keys, start=1):
-            assigned[series_key] = base_dir.with_name(f"{base_dir.name}_{index:02d}")
+        index = 1
+        while True:
+            candidate = base_dir.with_name(f"{base_dir.name}_{index:02d}")
+            if candidate not in used and candidate not in reserved:
+                break
+            index += 1
+        assigned[series_key] = candidate
+        used.add(candidate)
     return assigned
 
 
 def materialize(source: Path, destination: Path, action: str, overwrite: bool) -> None:
-    if overwrite and destination.exists():
-        destination.unlink()
-    if action == "copy":
-        shutil.copy2(source, destination)
-    elif action == "symlink":
-        destination.symlink_to(source)
-    elif action == "hardlink":
-        os.link(source, destination)
-    elif action == "move":
-        shutil.move(source, destination)
-    else:
+    if action not in ACTIONS:
         raise ValueError(f"Unsupported action: {action}")
+    if not overwrite and (destination.exists() or destination.is_symlink()):
+        raise FileExistsError(f"Target exists: {destination}")
+
+    if action == "move":
+        try:
+            os.replace(source, destination)  # Atomic on the same filesystem
+            return
+        except OSError as exc:
+            if exc.errno != errno.EXDEV:
+                raise
+
+    temp_path = destination.with_name(f".{destination.name}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        if action in ("copy", "move"):
+            shutil.copy2(source, temp_path)
+        elif action == "symlink":
+            temp_path.symlink_to(source)
+        elif action == "hardlink":
+            os.link(source, temp_path)
+        os.replace(temp_path, destination)
+    except BaseException:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+    if action == "move":
+        source.unlink()
 
 
 def build_items(args: argparse.Namespace | OrganizeOptions) -> tuple[list[OrganizedItem], Counter[str]]:
@@ -1477,7 +1598,7 @@ def build_items(args: argparse.Namespace | OrganizeOptions) -> tuple[list[Organi
     seen_destinations: set[Path] = set()
     items: list[OrganizedItem] = []
     dicom_tag_specs = parse_dicom_tag_specs(options.dicom_tags)
-    pending_sources: list[tuple[Path, dict[str, Any], str, tuple[str, str]]] = []
+    pending_sources: list[tuple[Path, dict[str, Any], str, tuple[Any, ...]]] = []
 
     for source in iter_candidate_files(input_root, output_root, options):
         stats["candidate_files"] += 1
@@ -1497,18 +1618,21 @@ def build_items(args: argparse.Namespace | OrganizeOptions) -> tuple[list[Organi
             source,
             dicom_tag_specs,
         )
-        acquisition_date = context["acquisition_date"]
+        study_date = context["study_date"]
+        device_folder = context["device_folder"]
         filename = safe_name(format_template(options.file_template, context, "file"))
-        pending_sources.append((source, context, filename, (acquisition_date, context["series_uid"])))
+        pending_sources.append(
+            (source, context, filename, (device_folder, study_date, context["series_uid"]))
+        )
         stats["dicom_files"] += 1
 
         if options.limit and stats["dicom_files"] >= options.limit:
             break
 
     pending_assignments = resolved_series_assignments(pending_sources)
-    pending: list[tuple[Path, dict[str, Any], str, tuple[str, str, tuple[str, ...]]]] = []
-    series_order: list[tuple[str, str, tuple[str, ...]]] = []
-    base_dir_by_series: dict[tuple[str, str, tuple[str, ...]], Path] = {}
+    pending: list[tuple[Path, dict[str, Any], str, tuple[Any, ...]]] = []
+    series_order: list[tuple[Any, ...]] = []
+    base_dir_by_series: dict[tuple[Any, ...], Path] = {}
     for (
         source,
         context,
@@ -1520,7 +1644,13 @@ def build_items(args: argparse.Namespace | OrganizeOptions) -> tuple[list[Organi
         series_dir_name = safe_name(
             format_template(options.series_dir_template, series_template_context, "series-dir")
         )
-        base_dir = output_root / context["acquisition_date"] / series_dir_name
+        base_dir = ensure_within_output_root(
+            output_root,
+            output_root
+            / context["device_folder"]
+            / context["study_date"]
+            / series_dir_name,
+        )
         if series_key not in base_dir_by_series:
             base_dir_by_series[series_key] = base_dir
             series_order.append(series_key)
@@ -1535,6 +1665,7 @@ def build_items(args: argparse.Namespace | OrganizeOptions) -> tuple[list[Organi
             stats["skipped_existing"] += 1
             continue
 
+        resolved = ensure_within_output_root(output_root, resolved)
         seen_destinations.add(resolved)
         row = dict(context["row"])
         row["OrganizedFileName"] = resolved.relative_to(output_root).as_posix()
@@ -1543,34 +1674,60 @@ def build_items(args: argparse.Namespace | OrganizeOptions) -> tuple[list[Organi
     return items, stats
 
 
+def existing_metadata_rows(
+    csv_path: Path, output_root: Path, replaced_names: set[str]
+) -> list[dict[str, str]]:
+    if not csv_path.exists():
+        return []
+    rows: list[dict[str, str]] = []
+    with csv_path.open(encoding="utf-8-sig", newline="") as handle:
+        for raw in csv.DictReader(handle):
+            name = (raw.get("OrganizedFileName") or "").strip()
+            if not name or name in replaced_names:
+                continue                      # Will be replaced by current rows
+            target = output_root / name
+            if not (target.exists() or target.is_symlink()):
+                continue                      # Drop rows whose target no longer exists
+            rows.append({key: (value or "N/A") for key, value in raw.items() if key})
+    return rows
+
+
 def write_metadata_tables(
     output_root: Path,
     items: list[OrganizedItem],
     profile_name: str,
     extra_metadata_columns: list[str] | None = None,
 ) -> None:
-    by_date: dict[str, list[OrganizedItem]] = defaultdict(list)
+    by_dir: dict[Path, list[OrganizedItem]] = defaultdict(list)
     for item in items:
-        by_date[item.row["AcquisitionDate"]].append(item)
+        by_dir[item.destination.parent.parent].append(item)
 
-    for acquisition_date, date_items in sorted(by_date.items()):
-        date_dir = output_root / acquisition_date
+    for group_dir, group_items in sorted(by_dir.items(), key=lambda x: str(x[0])):
+        ensure_within_output_root(output_root, group_dir)
+        group_dir.mkdir(parents=True, exist_ok=True)
+        replaced_names = {item.row["OrganizedFileName"] for item in group_items}
+        existing_rows = existing_metadata_rows(
+            group_dir / "dicom_parameters.csv", output_root, replaced_names
+        )
+        combined_rows = [item.row for item in group_items] + existing_rows
         rows = sorted(
-            (item.row for item in date_items),
+            combined_rows,
             key=lambda row: (
-                row["SeriesNumber"],
-                int(row["InstanceNumber"]) if row["InstanceNumber"].isdigit() else 0,
-                row["OrganizedFileName"],
+                str(row.get("SeriesNumber", "")),
+                int(row["InstanceNumber"])
+                if str(row.get("InstanceNumber", "")).isdigit()
+                else 0,
+                str(row.get("OrganizedFileName", "")),
             ),
         )
         profile_rows = add_series_aggregates(metadata_rows(rows, profile_name))
         write_csv(
-            date_dir / "dicom_parameters.csv",
+            group_dir / "dicom_parameters.csv",
             metadata_columns_for_profile(profile_name, profile_rows, extra_metadata_columns),
             profile_rows,
         )
         write_csv(
-            date_dir / "series_summary.csv",
+            group_dir / "series_summary.csv",
             summary_columns_for_profile(
                 profile_name,
                 profile_rows,
@@ -1587,7 +1744,7 @@ def write_metadata_tables(
 def write_csv(path: Path, columns: list[str], rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore", restval="N/A")
         writer.writeheader()
         writer.writerows(rows)
 
@@ -1685,6 +1842,9 @@ def write_run_summary(
 ) -> None:
     by_series = Counter(item.destination.parent.relative_to(output_root).as_posix() for item in items)
     by_date = Counter(item.row["AcquisitionDate"] for item in items)
+    device_dates = Counter(
+        item.destination.parent.parent.relative_to(output_root).as_posix() for item in items
+    )
     summary_counts = summarize_items(items, stats, output_root, options.profile)
     summary = {
         "started_at": started_at,
@@ -1708,10 +1868,11 @@ def write_run_summary(
         "csv_excluded_files_by_modality": summary_counts["csv_excluded_files_by_modality"],
         "skipped_non_dicom": stats["skipped_non_dicom"],
         "skipped_existing": stats["skipped_existing"],
+        "device_dates": dict(sorted(device_dates.items())),
         "acquisition_dates": dict(sorted(by_date.items())),
         "series_count": len(by_series),
     }
-    path = output_root / "organize_summary.json"
+    path = ensure_within_output_root(output_root, output_root / "organize_summary.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, ensure_ascii=False)
@@ -1725,6 +1886,9 @@ def summarize_items(
     profile_name: str = "auto",
 ) -> dict[str, Any]:
     by_date = Counter(item.row["AcquisitionDate"] for item in items)
+    device_dates = Counter(
+        item.destination.parent.parent.relative_to(output_root).as_posix() for item in items
+    )
     by_series = Counter(item.destination.parent.relative_to(output_root).as_posix() for item in items)
     rows = [item.row for item in items]
     csv_target_rows = metadata_rows(rows, profile_name)
@@ -1744,6 +1908,7 @@ def summarize_items(
         "series_count": len(by_series),
         "skipped_non_dicom": stats["skipped_non_dicom"],
         "skipped_existing": stats["skipped_existing"],
+        "device_dates": dict(sorted(device_dates.items())),
         "acquisition_dates": dict(sorted(by_date.items())),
         "output_root": str(output_root),
         "profile": profile_name,
@@ -1751,12 +1916,11 @@ def summarize_items(
 
 
 def planned_metadata_outputs(output_root: Path, items: list[OrganizedItem]) -> list[str]:
-    dates = sorted({item.row["AcquisitionDate"] for item in items})
     outputs: list[str] = []
-    for acquisition_date in dates:
-        date_dir = output_root / acquisition_date
-        outputs.append((date_dir / "dicom_parameters.csv").as_posix())
-        outputs.append((date_dir / "series_summary.csv").as_posix())
+    group_dirs = sorted({item.destination.parent.parent for item in items}, key=lambda p: str(p))
+    for group_dir in group_dirs:
+        outputs.append((group_dir / "dicom_parameters.csv").as_posix())
+        outputs.append((group_dir / "series_summary.csv").as_posix())
     outputs.append((output_root / "organize_summary.json").as_posix())
     return outputs
 
@@ -1796,8 +1960,8 @@ def print_summary(
     print(f"series_count={summary['series_count']}")
     print(f"skipped_non_dicom={summary['skipped_non_dicom']}")
     print(f"skipped_existing={summary['skipped_existing']}")
-    for acquisition_date, count in summary["acquisition_dates"].items():
-        print(f"{acquisition_date}: files={count}")
+    for device_date, count in summary.get("device_dates", {}).items():
+        print(f"{device_date}: files={count}")
     print(f"output_root={output_root}")
     if dry_run and items:
         print("planned_metadata_outputs:")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dicom_organizer import i18n, messages
 from dicom_organizer.core import (
     __version__,
     OrganizeOptions,
@@ -17,5 +18,7 @@ __all__ = [
     "OrganizedItem",
     "build_items",
     "build_series_summary",
+    "i18n",
+    "messages",
     "run",
 ]

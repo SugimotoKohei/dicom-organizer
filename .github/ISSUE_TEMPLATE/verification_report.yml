@@ -1,0 +1,92 @@
+name: Scanner Verification Report / 装置・実データ検証報告
+description: Share verification results for your medical imaging scanner / お使いの医療機器・モダリティでの検証結果を共有する
+title: "📋 verify: [Manufacturer] [Model] [Modality]"
+labels: ["verification"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for contributing verification results! Your report helps improve vendor compatibility for research and clinical communities.
+        Please do NOT include patient names, patient IDs, study dates, UIDs, or private clinic paths in this report.
+        検証結果のご報告ありがとうございます！皆様の検証報告が装置互換性の向上につながります。患者氏名、ID、検査日、UID、個人名を含むパス等は絶対に記載しないでください。
+  - type: checkboxes
+    attributes:
+      label: Pre-submission Checklist / 事前確認
+      options:
+        - label: I have verified that NO patient identifiers (PHI), real DICOM binary files, or private machine paths are included. / 患者情報（PHI）、実際の DICOM ファイル、個人名入りパスが含まれていないことを確認しました。
+          required: true
+  - type: input
+    attributes:
+      label: Scanner Manufacturer / 製造者
+      description: "e.g., Siemens Healthineers, GE Healthcare, Philips, Canon Medical Systems"
+      placeholder: "Siemens Healthineers"
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Scanner Model / 機種名
+      description: "e.g., MAGNETOM Skyra, SIGNA Architect, MR 7700, Aquilion ONE"
+      placeholder: "MAGNETOM Skyra"
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Software / System Version / ソフトウェア・システムバージョン
+      description: "e.g., VE11E, DV26.0, R5.6"
+      placeholder: "VE11E"
+    validations:
+      required: false
+  - type: dropdown
+    attributes:
+      label: Modality / モダリティ
+      options:
+        - MR (Magnetic Resonance)
+        - CT (Computed Tomography)
+        - PT / PET (Positron Emission Tomography)
+        - US (Ultrasound)
+        - XA (X-Ray Angiography)
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: DICOM Data Type / データの種類
+      options:
+        - Classic Single-frame DICOM
+        - Enhanced Multi-frame DICOM
+        - Compressed Transfer Syntax (JPEG, JPEG 2000, etc.)
+        - Non-image Objects (DICOMDIR, SR, RTSTRUCT, PR)
+        - Mixed
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: dicom-organizer Version / 使用した dicom-organizer の版
+      description: "e.g., 0.2.0 (check with `dicom-organizer --version`)"
+      placeholder: "0.2.0"
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Successful Extractions / 正しく取得できた項目・動作した点
+      description: Which acquisition parameters were correctly populated? / どの撮像条件や機能が正しく取得・動作しましたか？
+      placeholder: |
+        - TR_ms, TE_ms, FlipAngle_deg: OK (100%)
+        - PhaseEncodingDirectionPatient: OK
+        - ScanDuration: OK (ASCCONV private protocol fallback worked)
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Missing or N/A Columns / N/A になった列・取得できなかった項目
+      description: Were any expected parameters reported as N/A or inaccurate? / N/A となった項目や期待と異なる値があれば教えてください。
+      placeholder: |
+        - ParallelReductionFactorInPlane: N/A (standard tag was absent)
+    validations:
+      required: false
+  - type: textarea
+    attributes:
+      label: Additional Notes / その他気づいた点や提案
+      description: Any duplicate handling notes, folder structure feedback, or suggestions?
+    validations:
+      required: false

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Organize DICOM files into stable series directories.
 
-The default output layout intentionally matches the older local organizer:
+The default output layout organizes files by device, study date, and series:
 
-    organized/<AcquisitionDate>/<SeriesNumber>_<SeriesFolderLabel>/
+    organized/<Device>/<StudyDate>/<SeriesNumber>_<SeriesFolderLabel>/
         000001.dcm
         ...
-    organized/<AcquisitionDate>/
+    organized/<Device>/<StudyDate>/
         dicom_parameters.csv
         series_summary.csv
     organized/organize_summary.json
@@ -19,19 +19,26 @@ from __future__ import annotations
 
 import argparse
 import csv
+import errno
 import hashlib
 import importlib.metadata
 import json
 import math
 import os
+import platform
 import re
 import shutil
 import sys
+import threading
+import tomllib
+import uuid
+import warnings
 from collections import Counter, defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pydicom
 from pydicom.datadict import keyword_for_tag, tag_for_keyword
@@ -50,7 +57,79 @@ from pydicom.uid import (
     XRayAngiographicImageStorage,
 )
 
-__version__ = "0.1.4"
+__version__ = "0.2.0"
+OUTPUT_SCHEMA_VERSION = 2
+
+SKIP_REASONS = (
+    "not_dicom",
+    "dicomdir",
+    "missing_required_uid",
+    "read_error",
+    "permission_denied",
+    "io_error",
+    "excluded_hidden",
+    "duplicate_identical",
+    "existing_output",
+)
+
+FILE_REPORT_COLUMNS = [
+    "SourceFileName",
+    "Status",
+    "Reason",
+    "Detail",
+    "OrganizedFileName",
+    "DuplicateOf",
+    "SOPInstanceUID",
+    "SeriesUID",
+    "Modality",
+    "SizeBytes",
+    "SHA256",
+]
+
+
+class InsufficientSpaceError(OSError):
+    """Raised when destination has insufficient disk space."""
+
+
+class IntegrityError(RuntimeError):
+    """Raised when file integrity check fails after organization."""
+
+
+@dataclass(frozen=True)
+class HeaderReadResult:
+    dataset: pydicom.dataset.Dataset | None
+    reason: str
+    detail: str
+
+
+@dataclass
+class FileRecord:
+    source: Path
+    status: str
+    reason: str = "N/A"
+    detail: str = "N/A"
+    destination: Path | None = None
+    duplicate_of: Path | None = None
+    sop_instance_uid: str = "N/A"
+    series_uid: str = "N/A"
+    modality: str = "N/A"
+    size_bytes: int | None = None
+    sha256: str = "N/A"
+
+
+@dataclass
+class _SopTracker:
+    first_source: Path
+    first_record: FileRecord
+    hashes: dict[str, Path] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ProgressEvent:
+    stage: str
+    done: int
+    total: int | None
+    message: str = ""
 
 
 def package_version() -> str:
@@ -74,8 +153,9 @@ def merge_columns(*groups: list[str] | tuple[str, ...]) -> list[str]:
 
 COMMON_METADATA_COLUMNS = [
     "OrganizedFileName",
+    "StudyFolder",
+    "SeriesFolder",
     "SeriesUID",
-    "SeriesUIDHash",
     "SOPInstanceUID",
     "SeriesNumber",
     "SeriesDescription",
@@ -112,6 +192,10 @@ COMMON_METADATA_COLUMNS = [
     "FrameOfReferenceUID",
     "StudyInstanceUID",
     "IsNormalized",
+    "ScanDuration",
+    "ScanDurationSource",
+    "NumberOfFrames",
+    "FrameVaryingAttributes",
 ]
 
 MR_METADATA_COLUMNS = [
@@ -160,7 +244,9 @@ US_METADATA_COLUMNS = [
     "TransducerData",
     "TransducerType",
     "MechanicalIndex",
-    "ThermalIndex",
+    "SoftTissueThermalIndex",
+    "BoneThermalIndex",
+    "CranialThermalIndex",
     "UltrasoundColorDataPresent",
 ]
 
@@ -191,10 +277,11 @@ PER_INSTANCE_METADATA_COLUMNS = {
 
 COMMON_SUMMARY_COLUMNS = merge_columns(
     [
+        "StudyFolder",
+        "SeriesFolder",
         "AcquisitionDate",
         "SeriesNumber",
         "SeriesUID",
-        "SeriesUIDHash",
         "Modality",
         "SeriesDescription",
         "ProtocolName",
@@ -251,9 +338,145 @@ DEFAULT_FILE_TEMPLATE = "{instance_number_6}.dcm"
 ACTIONS = ("copy", "symlink", "hardlink", "move")
 IF_EXISTS_MODES = ("error", "skip", "overwrite", "rename")
 PATIENT_MODES = ("keep", "hash", "drop")
+LAYOUTS = ("device-date", "study", "patient-study")
+
+CONFIG_KEYS: tuple[str, ...] = (
+    "output",
+    "action",
+    "if_exists",
+    "profile",
+    "patient_mode",
+    "layout",
+    "list_only",
+    "dicom_tags",
+    "force_read",
+    "include_hidden",
+    "include_organized",
+    "series_dir_template",
+    "file_template",
+    "checksum",
+    "space_check",
+    "progress",
+)
+
+CONFIG_KEY_TYPES: dict[str, type] = {
+    "output": str,
+    "action": str,
+    "if_exists": str,
+    "profile": str,
+    "patient_mode": str,
+    "layout": str,
+    "list_only": bool,
+    "dicom_tags": list,
+    "force_read": bool,
+    "include_hidden": bool,
+    "include_organized": bool,
+    "series_dir_template": str,
+    "file_template": str,
+    "checksum": bool,
+    "space_check": bool,
+    "progress": bool,
+}
+
+CONFIG_CHOICES: dict[str, tuple[str, ...]] = {
+    "action": tuple(ACTIONS),
+    "if_exists": tuple(IF_EXISTS_MODES),
+    "profile": tuple(PROFILE_NAMES),
+    "patient_mode": tuple(PATIENT_MODES),
+    "layout": tuple(LAYOUTS),
+}
+
+
+def load_config(path: Path) -> dict[str, Any]:
+    """Load and validate facility configuration file from TOML format."""
+    path = Path(path).expanduser()
+    if not path.is_file():
+        raise ValueError(f"Configuration file not found: '{path}'")
+    try:
+        with path.open("rb") as f:
+            data = tomllib.load(f)
+    except Exception as exc:
+        raise ValueError(f"Failed to parse TOML configuration file '{path}': {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError(f"Configuration file '{path}' must define a top-level table")
+
+    allowed_keys_set = set(CONFIG_KEYS)
+    for key in data:
+        if key not in allowed_keys_set:
+            raise ValueError(
+                f"Unknown config key '{key}' in '{path}'. "
+                f"Allowed keys are: {', '.join(CONFIG_KEYS)}"
+            )
+
+    validated: dict[str, Any] = {}
+    for key, val in data.items():
+        expected_type = CONFIG_KEY_TYPES[key]
+        if expected_type is bool:
+            if not isinstance(val, bool):
+                raise ValueError(
+                    f"Config key '{key}' in '{path}' expects boolean (true/false), got {type(val).__name__}"
+                )
+        elif expected_type is str:
+            if not isinstance(val, str) or isinstance(val, bool):
+                raise ValueError(
+                    f"Config key '{key}' in '{path}' expects string, got {type(val).__name__}"
+                )
+        elif expected_type is list:
+            if not isinstance(val, list):
+                raise ValueError(
+                    f"Config key '{key}' in '{path}' expects array of strings, got {type(val).__name__}"
+                )
+            for item in val:
+                if not isinstance(item, str) or isinstance(item, bool):
+                    raise ValueError(
+                        f"Config key '{key}' in '{path}' expects array of strings, found {type(item).__name__}"
+                    )
+
+        if key in CONFIG_CHOICES:
+            choices = CONFIG_CHOICES[key]
+            if val not in choices:
+                raise ValueError(
+                    f"Invalid value '{val}' for config key '{key}' in '{path}'. "
+                    f"Allowed choices are: {', '.join(choices)}"
+                )
+
+        if key == "output":
+            out_p = Path(val).expanduser()
+            if not out_p.is_absolute():
+                val = str((path.parent / out_p).resolve())
+            else:
+                val = str(out_p.resolve())
+
+        validated[key] = val
+
+    return validated
+
+
+def config_to_toml(values: dict[str, Any]) -> str:
+    """Format configuration dictionary as TOML ordered by CONFIG_KEYS."""
+    lines: list[str] = []
+    for key in CONFIG_KEYS:
+        if key not in values:
+            continue
+        val = values[key]
+        if isinstance(val, bool):
+            lines.append(f"{key} = {'true' if val else 'false'}")
+        elif isinstance(val, str):
+            lines.append(f"{key} = {json.dumps(val)}")
+        elif isinstance(val, (list, tuple)):
+            items_str = ", ".join(json.dumps(str(x)) for x in val)
+            lines.append(f"{key} = [{items_str}]")
+        else:
+            lines.append(f"{key} = {json.dumps(val)}")
+    return "\n".join(lines) + ("\n" if lines else "")
+
 
 SIEMENS_PARALLEL_REDUCTION_FACTOR_PATTERN = re.compile(
     rb"(?:^|[\x00\r\n ])sPat\.lAccelFactPE\s*=\s*([0-9]+(?:\.[0-9]+)?)"
+)
+SIEMENS_TOTAL_SCAN_TIME_PATTERN = re.compile(
+    rb"(?:^|[\x00\r\n ])lTotalScanTimeSec\s*=\s*([0-9]+(?:\.[0-9]+)?)"
 )
 
 
@@ -282,6 +505,11 @@ class OrganizeOptions:
     patient_mode: str = "keep"
     dicom_tags: tuple[str, ...] = ()
     verbose: bool = False
+    checksum: bool = False
+    space_check: bool = True
+    list_only: bool = False
+    layout: str = "device-date"
+    config_file: str | None = None
 
 
 @dataclass(frozen=True)
@@ -355,20 +583,82 @@ class OrganizeResult:
     ended_at: str
     dry_run: bool
     profile: str
+    status: str = "completed"
+    file_records: list[FileRecord] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    previous_run_status: str | None = None
+    list_only: bool = False
+    privacy_notices: list[str] = field(default_factory=list)
 
     @property
     def summary(self) -> dict[str, Any]:
-        return summarize_items(self.items, self.stats, self.output_root, self.profile)
+        return summarize_items(
+            self.items,
+            self.stats,
+            self.output_root,
+            self.profile,
+            status=self.status,
+            list_only=self.list_only,
+        )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--config")
+    pre_parser.add_argument("--print-config", action="store_true")
+    pre_parser.add_argument("--self-test", action="store_true")
+    pre_parser.add_argument("--self-test-report", type=Path)
+    pre_parser.add_argument("--diagnostics", action="store_true")
+    pre_parser.add_argument("--print-schema", action="store_true")
+    pre_args, _ = pre_parser.parse_known_args(argv)
+
+    config_path_str = pre_args.config
+    if config_path_str is None:
+        config_path_str = os.environ.get("DICOM_ORGANIZER_CONFIG")
+
+    config_values: dict[str, Any] = {}
+    config_file_resolved: str | None = None
+    if config_path_str:
+        config_path = Path(config_path_str).expanduser()
+        config_values = load_config(config_path)
+        config_file_resolved = str(config_path.resolve())
+
     parser = argparse.ArgumentParser(
-        description="Organize DICOM files by AcquisitionDate and SeriesInstanceUID."
+        description="Organize DICOM files by device, StudyDate, and SeriesInstanceUID."
     )
     parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {package_version()}",
+    )
+    parser.add_argument(
+        "--config",
+        help="Path to TOML configuration file for facility-wide settings.",
+    )
+    parser.add_argument(
+        "--print-config",
+        action="store_true",
+        help="Print effective configuration in TOML format and exit.",
+    )
+    parser.add_argument(
+        "--print-schema",
+        action="store_true",
+        help="Print machine-readable column schema as JSON and exit.",
+    )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Run self-diagnostic tests and exit.",
+    )
+    parser.add_argument(
+        "--self-test-report",
+        type=Path,
+        help="Save self-test report to specified file.",
+    )
+    parser.add_argument(
+        "--diagnostics",
+        action="store_true",
+        help="Print environment diagnostics for bug reports and exit.",
     )
     parser.add_argument(
         "input_path",
@@ -406,6 +696,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=IF_EXISTS_MODES,
         default="error",
         help="Behavior when the target file already exists. Default: error.",
+    )
+    parser.add_argument(
+        "--list-only",
+        action="store_true",
+        help="Do not copy DICOM files; write parameter tables and reports only.",
+    )
+    parser.add_argument(
+        "--layout",
+        choices=LAYOUTS,
+        default="device-date",
+        help="Organization layout preset: device-date, study, or patient-study. Default: device-date.",
     )
     parser.add_argument(
         "-n",
@@ -483,6 +784,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--dicom-tag",
         "--tag",
         action="append",
+        dest="dicom_tags",
         default=[],
         metavar="TAG",
         help=(
@@ -497,13 +799,59 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Print skipped files and per-series output while running.",
     )
+    parser.add_argument(
+        "--checksum",
+        action="store_true",
+        default=False,
+        help="Verify SHA-256 checksum during file materialization.",
+    )
+    parser.add_argument(
+        "--no-space-check",
+        dest="space_check",
+        action="store_false",
+        default=True,
+        help="Disable free disk space pre-check.",
+    )
+    parser.add_argument(
+        "--no-progress",
+        dest="progress",
+        action="store_false",
+        default=True,
+        help="Disable console progress display.",
+    )
+
+    defaults_to_set: dict[str, Any] = {}
+    for key, val in config_values.items():
+        if key == "output":
+            defaults_to_set["output"] = Path(val)
+        elif key == "dicom_tags":
+            defaults_to_set["dicom_tags"] = list(val)
+        else:
+            defaults_to_set[key] = val
+
+    if defaults_to_set:
+        parser.set_defaults(**defaults_to_set)
+
     args = parser.parse_args(argv)
-    if args.input is None and args.input_path is None:
-        parser.error("the following arguments are required: INPUT (or --input)")
-    if args.input is not None and args.input_path is not None:
-        parser.error("specify the input directory either as INPUT or --input, not both")
-    args.input = args.input if args.input is not None else args.input_path
+    args.config_file = config_file_resolved
+
+    is_standalone_mode = bool(
+        args.self_test or args.diagnostics or args.print_config or args.print_schema
+    )
+    if not is_standalone_mode:
+        if args.input is None and args.input_path is None:
+            parser.error("the following arguments are required: INPUT (or --input)")
+        if args.input is not None and args.input_path is not None:
+            parser.error("specify the input directory either as INPUT or --input, not both")
+        args.input = args.input if args.input is not None else args.input_path
+    else:
+        if args.input is None and args.input_path is not None:
+            args.input = args.input_path
     return args
+
+
+def resolved_root(value: Path | str) -> Path:
+    return Path(value).expanduser().resolve()
 
 
 def normalize_options(
@@ -513,15 +861,25 @@ def normalize_options(
     validate: bool = False,
 ) -> OrganizeOptions:
     if isinstance(args, OrganizeOptions):
-        options = replace(args, dry_run=dry_run) if dry_run is not None else args
+        overrides: dict[str, Any] = {
+            "input_root": resolved_root(args.input_root),
+            "output_root": resolved_root(args.output_root),
+        }
+        if dry_run is not None:
+            overrides["dry_run"] = dry_run
+        options = replace(args, **overrides)
     else:
-        input_root = Path(args.input).expanduser().resolve()
+        input_root = resolved_root(args.input)
+        is_list_only = bool(getattr(args, "list_only", False))
         output_value = getattr(args, "output", None)
-        output_root = (
-            Path(output_value).expanduser().resolve()
-            if output_value
-            else input_root / "organized"
-        )
+        if is_list_only and not output_value:
+            output_root = input_root / "organized_list"
+        else:
+            output_root = (
+                resolved_root(output_value)
+                if output_value
+                else input_root / "organized"
+            )
         options = OrganizeOptions(
             input_root=input_root,
             output_root=output_root,
@@ -544,6 +902,11 @@ def normalize_options(
             patient_mode=str(getattr(args, "patient_mode", "keep")),
             dicom_tags=tuple(str(tag) for tag in getattr(args, "dicom_tags", ()) or ()),
             verbose=bool(getattr(args, "verbose", False)),
+            checksum=bool(getattr(args, "checksum", False)),
+            space_check=bool(getattr(args, "space_check", True)),
+            list_only=is_list_only,
+            layout=str(getattr(args, "layout", "device-date") or "device-date"),
+            config_file=getattr(args, "config_file", None),
         )
 
     if validate:
@@ -556,6 +919,8 @@ def validate_options(options: OrganizeOptions) -> None:
         raise ValueError(f"Unsupported --action value: {options.action}")
     if options.if_exists not in IF_EXISTS_MODES:
         raise ValueError(f"Unsupported --if-exists value: {options.if_exists}")
+    if options.layout not in LAYOUTS:
+        raise ValueError(f"Unsupported --layout value: {options.layout}")
     if options.profile not in PROFILE_NAMES:
         raise ValueError(f"Unsupported --profile value: {options.profile}")
     if options.patient_mode not in PATIENT_MODES:
@@ -730,6 +1095,8 @@ def private_text_fields(raw: str, mode: str) -> tuple[str, str]:
         return raw, digest
     if mode == "hash":
         return f"sha256:{digest}", digest
+    if mode == "drop":
+        return "N/A", "N/A"
     return "N/A", digest
 
 
@@ -747,6 +1114,153 @@ def safe_name(value: str, fallback: str = "NA") -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._+-]+", "-", value.strip())
     cleaned = cleaned.strip("-_.")
     return cleaned or fallback
+
+
+def compute_study_key(study_uid: str) -> str:
+    return hash_text(study_uid, 8)
+
+
+def compute_patient_key(patient_id: str, issuer: str, patient_mode: str) -> str:
+    if not patient_id or patient_id == "N/A":
+        return "unknown-patient"
+    if patient_mode == "keep":
+        if issuer and issuer != "N/A":
+            raw_key = f"{patient_id}_{issuer}"
+        else:
+            raw_key = patient_id
+        sanitized = safe_name(raw_key)
+        if sanitized != raw_key:
+            digest = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:8]
+            return f"{sanitized}-{digest}"
+        return sanitized
+    issuer_part = issuer if (issuer and issuer != "N/A") else ""
+    raw = f"{issuer_part}|{patient_id}"
+    return "P-" + hashlib.sha256(raw.encode()).hexdigest()[:12]
+
+
+def compute_study_folder(
+    layout: str,
+    device_folder: str,
+    study_date: str,
+    study_key: str,
+    patient_key: str,
+) -> str:
+    if layout == "device-date":
+        return f"{device_folder}/{study_date}"
+    if layout == "study":
+        return f"{study_date}_{study_key}"
+    if layout == "patient-study":
+        return f"{patient_key}/{study_date}_{study_key}"
+    raise ValueError(f"Unsupported layout: {layout}")
+
+
+DIRECT_IDENTIFIER_TAGS = {
+    "PatientName",
+    "PatientID",
+    "IssuerOfPatientID",
+    "OtherPatientIDs",
+    "OtherPatientIDsSequence",
+    "OtherPatientNames",
+    "PatientBirthName",
+    "PatientBirthDate",
+    "PatientBirthTime",
+    "PatientAddress",
+    "PatientTelephoneNumbers",
+    "PatientMotherBirthName",
+    "MedicalRecordLocator",
+    "AccessionNumber",
+    "ReferringPhysicianName",
+    "PerformingPhysicianName",
+    "OperatorsName",
+    "InstitutionName",
+    "InstitutionAddress",
+}
+
+
+def patient_data_notices(options: OrganizeOptions) -> list[str]:
+    """Return stable notice codes describing what patient information remains."""
+    notices: list[str] = []
+    if options.patient_mode == "keep":
+        notices.append("csv_patient_fields_kept")
+    elif options.patient_mode == "hash":
+        notices.append("csv_patient_fields_hashed")
+    elif options.patient_mode == "drop":
+        notices.append("csv_patient_fields_dropped")
+
+    if options.list_only:
+        notices.append("no_dicom_copies")
+    else:
+        notices.append("dicom_files_unchanged")
+
+    notices.append("csv_other_identifiers")
+
+    if options.dicom_tags:
+        notices.append("custom_tags_written")
+
+    if options.layout == "patient-study":
+        if options.patient_mode == "keep":
+            notices.append("folder_names_contain_patient_id")
+        else:
+            notices.append("folder_names_contain_patient_key")
+
+    return notices
+
+
+def safe_date(value: str, fallback: str = "unknown_date") -> str:
+    """Return a YYYYMMDD folder-safe date, or the fallback when it is not a valid date."""
+    text = str(value).strip()
+    digits = re.sub(r"\D", "", text)
+    if len(digits) != 8:
+        return fallback
+    try:
+        datetime.strptime(digits, "%Y%m%d")
+    except ValueError:
+        return fallback
+    return digits
+
+
+def ensure_within_output_root(output_root: Path, path: Path) -> Path:
+    """Return path unchanged after verifying that it stays inside output_root."""
+    root = output_root.resolve()
+    candidate = path if path.is_absolute() else output_root / path
+    if not candidate.resolve().is_relative_to(root):
+        raise ValueError(f"Output path escapes the output root: {candidate}")
+    return candidate
+
+
+def normalize_vendor_name(manufacturer: str) -> str:
+    cleaned = manufacturer.strip()
+    if not cleaned or cleaned == "N/A":
+        return ""
+    m = cleaned.casefold()
+    if re.search(r"\bge\b", m) or "general electric" in m:
+        return "GE"
+    if "siemens" in m:
+        return "Siemens"
+    if "philips" in m:
+        return "Philips"
+    if "canon" in m:
+        return "Canon"
+    if "toshiba" in m:
+        return "Toshiba"
+    if "hitachi" in m:
+        return "Hitachi"
+    if "fujifilm" in m or re.search(r"\bfuji\b", m):
+        return "Fujifilm"
+    return safe_name(cleaned, fallback="UnknownVendor")
+
+
+def device_folder_name(manufacturer: str, model_name: str) -> str:
+    vendor = normalize_vendor_name(manufacturer)
+    cleaned_model = model_name.strip() if model_name and model_name != "N/A" else ""
+    model = safe_name(cleaned_model, fallback="") if cleaned_model else ""
+    if vendor and model:
+        return f"{vendor}_{model}"
+    if model:
+        return model
+    if vendor:
+        return vendor
+    return "UnknownDevice"
 
 
 def series_number(ds: pydicom.dataset.Dataset) -> str:
@@ -832,17 +1346,20 @@ def dominant_philips_reconstruction(contexts: list[dict[str, Any]]) -> tuple[str
 
 
 def resolved_series_assignments(
-    pending: list[tuple[Path, dict[str, Any], str, tuple[str, str]]],
-) -> list[tuple[tuple[str, str, tuple[str, ...]], dict[str, str]]]:
-    assignments: list[tuple[tuple[str, str, tuple[str, ...]], dict[str, str]]] = [
-        (("", "", ()), {}) for _ in pending
+    pending: list[tuple[Path, dict[str, Any], str, tuple[Any, ...]]],
+) -> list[tuple[tuple[Any, ...], dict[str, str]]]:
+    assignments: list[tuple[tuple[Any, ...], dict[str, str]]] = [
+        ((), {}) for _ in pending
     ]
-    indices_by_series: dict[tuple[str, str], list[int]] = defaultdict(list)
-    anchor_labels: dict[tuple[str, str, tuple[str, ...]], str] = {}
+    indices_by_series: dict[tuple[Any, ...], list[int]] = defaultdict(list)
+    anchor_labels: dict[tuple[str, str, str, tuple[str, ...]], str] = {}
 
-    anchor_candidates: dict[tuple[str, str, tuple[str, ...]], set[str]] = defaultdict(set)
+    anchor_candidates: dict[tuple[str, str, str, tuple[str, ...]], set[str]] = defaultdict(set)
     for _source, context, _filename, _base_series_key in pending:
         if not context["is_philips_mr"]:
+            continue
+        study_instance_uid = context.get("study_instance_uid", "")
+        if not study_instance_uid or study_instance_uid == "N/A":
             continue
         acquisition_number = context["acquisition_number"]
         if not acquisition_number or acquisition_number == "N/A":
@@ -850,7 +1367,8 @@ def resolved_series_assignments(
         if is_numeric_series_label(context["raw_series_label"]):
             continue
         key = (
-            context["acquisition_date"],
+            study_instance_uid,
+            context["study_date"],
             acquisition_number,
             tuple(context["philips_image_type"]),
         )
@@ -875,14 +1393,17 @@ def resolved_series_assignments(
             reconstruction_name = ""
             series_label = context["series_label"]
             if context["is_philips_mr"] and is_numeric_series_label(context["raw_series_label"]):
-                anchor_key = (
-                    context["acquisition_date"],
-                    context["acquisition_number"],
-                    tuple(context["philips_image_type"]),
-                )
-                anchor_label = anchor_labels.get(anchor_key)
-                if anchor_label:
-                    series_label = safe_name(f"{anchor_label}_{series_label}")
+                study_instance_uid = context.get("study_instance_uid", "")
+                if study_instance_uid and study_instance_uid != "N/A":
+                    anchor_key = (
+                        study_instance_uid,
+                        context["study_date"],
+                        context["acquisition_number"],
+                        tuple(context["philips_image_type"]),
+                    )
+                    anchor_label = anchor_labels.get(anchor_key)
+                    if anchor_label:
+                        series_label = safe_name(f"{anchor_label}_{series_label}")
             if split_series:
                 effective_reconstruction = tuple(context["philips_image_type"]) or dominant_reconstruction
                 reconstruction_name = reconstruction_label(effective_reconstruction)
@@ -890,7 +1411,7 @@ def resolved_series_assignments(
             if reconstruction_name:
                 series_folder_label = f"{series_folder_label}_{reconstruction_name}"
             assignments[index] = (
-                (base_series_key[0], base_series_key[1], effective_reconstruction),
+                (*base_series_key, effective_reconstruction),
                 {
                     "series_label": series_label,
                     "reconstruction_label": reconstruction_name,
@@ -929,26 +1450,46 @@ def pixel_spacing(ds: pydicom.dataset.Dataset) -> str:
     return text_value(getattr(ds, "PixelSpacing", None), default="N/A")
 
 
+def functional_group_values(
+    ds: Any,
+    sequence_name: str,
+    attribute_name: str,
+) -> list[Any]:
+    """Return functional-group values in frame order.
+
+    A value in SharedFunctionalGroupsSequence applies to all frames and is returned once.
+    Otherwise values are collected from each PerFrameFunctionalGroupsSequence item that has it.
+    """
+    shared = getattr(ds, "SharedFunctionalGroupsSequence", None)
+    if shared:
+        for item in shared:
+            nested = getattr(item, sequence_name, None)
+            if nested:
+                for subitem in nested:
+                    val = getattr(subitem, attribute_name, None)
+                    if val is not None and val != "":
+                        return [val]
+    per_frame = getattr(ds, "PerFrameFunctionalGroupsSequence", None)
+    results = []
+    if per_frame:
+        for frame_item in per_frame:
+            nested = getattr(frame_item, sequence_name, None)
+            if nested:
+                for subitem in nested:
+                    val = getattr(subitem, attribute_name, None)
+                    if val is not None and val != "":
+                        results.append(val)
+    return results
+
+
 def functional_group_value(
     ds: pydicom.dataset.Dataset,
     sequence_name: str,
     attribute_name: str,
 ) -> Any | None:
     """Return the first shared/per-frame functional-group attribute value."""
-    for functional_groups_name in (
-        "SharedFunctionalGroupsSequence",
-        "PerFrameFunctionalGroupsSequence",
-    ):
-        functional_groups = getattr(ds, functional_groups_name, None)
-        if not functional_groups:
-            continue
-        nested_sequence = getattr(functional_groups[0], sequence_name, None)
-        if not nested_sequence:
-            continue
-        value = getattr(nested_sequence[0], attribute_name, None)
-        if value is not None and value != "":
-            return value
-    return None
+    values = functional_group_values(ds, sequence_name, attribute_name)
+    return values[0] if values else None
 
 
 def image_orientation_patient_value(ds: pydicom.dataset.Dataset) -> Any | None:
@@ -959,6 +1500,17 @@ def image_orientation_patient_value(ds: pydicom.dataset.Dataset) -> Any | None:
         ds,
         "PlaneOrientationSequence",
         "ImageOrientationPatient",
+    )
+
+
+def image_position_patient_value(ds: pydicom.dataset.Dataset) -> Any | None:
+    value = getattr(ds, "ImagePositionPatient", None)
+    if value is not None and value != "":
+        return value
+    return functional_group_value(
+        ds,
+        "PlanePositionSequence",
+        "ImagePositionPatient",
     )
 
 
@@ -1002,6 +1554,137 @@ def parallel_reduction_factor_in_plane_value(ds: pydicom.dataset.Dataset) -> Any
     return None
 
 
+ENHANCED_ATTRIBUTE_MAPPING: tuple[tuple[str, str, str, str], ...] = (
+    ("TR_ms", "RepetitionTime", "MRTimingAndRelatedParametersSequence", "RepetitionTime"),
+    ("FlipAngle_deg", "FlipAngle", "MRTimingAndRelatedParametersSequence", "FlipAngle"),
+    ("EchoTrainLength", "EchoTrainLength", "MRTimingAndRelatedParametersSequence", "EchoTrainLength"),
+    ("TE_ms", "EchoTime", "MREchoSequence", "EffectiveEchoTime"),
+    ("InversionTime_ms", "InversionTime", "MRModifierSequence", "InversionTimes"),
+    ("PixelBandwidth_Hz_per_px", "PixelBandwidth", "MRImagingModifierSequence", "PixelBandwidth"),
+    ("NumberOfAverages", "NumberOfAverages", "MRAveragesSequence", "NumberOfAverages"),
+    ("PixelSpacing", "PixelSpacing", "PixelMeasuresSequence", "PixelSpacing"),
+    ("SliceThickness_mm", "SliceThickness", "PixelMeasuresSequence", "SliceThickness"),
+    ("SpacingBetweenSlices_mm", "SpacingBetweenSlices", "PixelMeasuresSequence", "SpacingBetweenSlices"),
+    ("ImageOrientationPatient", "ImageOrientationPatient", "PlaneOrientationSequence", "ImageOrientationPatient"),
+    ("InPlanePhaseEncodingDirection", "InPlanePhaseEncodingDirection", "MRFOVGeometrySequence", "InPlanePhaseEncodingDirection"),
+    ("ParallelReductionFactorInPlane", "ParallelReductionFactorInPlane", "MRModifierSequence", "ParallelReductionFactorInPlane"),
+)
+
+
+def resolve_enhanced_attributes(
+    ds: pydicom.dataset.Dataset,
+) -> tuple[dict[str, str], str]:
+    """Resolve the 13 enhanced/classic attributes and return (values_dict, frame_varying_attributes)."""
+    has_per_frame = bool(getattr(ds, "PerFrameFunctionalGroupsSequence", None))
+    resolved: dict[str, str] = {}
+    varying_columns: list[str] = []
+
+    for col, classic_attr, fg_seq, fg_attr in ENHANCED_ATTRIBUTE_MAPPING:
+        classic_val = getattr(ds, classic_attr, None)
+        if classic_val is not None and classic_val != "":
+            if classic_attr == "PixelSpacing":
+                resolved[col] = pixel_spacing(ds)
+            else:
+                resolved[col] = text_value(classic_val)
+            continue
+
+        fg_vals = functional_group_values(ds, fg_seq, fg_attr)
+        if not fg_vals:
+            if col == "ParallelReductionFactorInPlane":
+                siemens_val = parallel_reduction_factor_in_plane_value(ds)
+                resolved[col] = text_value(siemens_val)
+            else:
+                resolved[col] = "N/A"
+            continue
+
+        seen: set[str] = set()
+        formatted_list: list[str] = []
+        for val in fg_vals:
+            t = text_value(val)
+            if not t or t == "N/A" or t in seen:
+                continue
+            seen.add(t)
+            formatted_list.append(t)
+
+        resolved[col] = "|".join(formatted_list) if formatted_list else "N/A"
+
+        if has_per_frame and len(formatted_list) > 1:
+            varying_columns.append(col)
+
+    if not has_per_frame:
+        frame_varying = "N/A"
+    elif varying_columns:
+        frame_varying = "|".join(varying_columns)
+    else:
+        frame_varying = "none"
+
+    return resolved, frame_varying
+
+
+def format_duration(value: Any) -> str:
+    """Format duration in seconds as HH:MM:SS rounded to the nearest second."""
+    if value is None or value == "":
+        return "N/A"
+    try:
+        sec_float = float(value)
+    except (TypeError, ValueError):
+        return "N/A"
+    if not math.isfinite(sec_float) or sec_float <= 0:
+        return "N/A"
+    total_seconds = int(
+        Decimal(str(sec_float)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    )
+    if total_seconds <= 0:
+        return "N/A"
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def scan_duration_fields(ds: pydicom.dataset.Dataset) -> tuple[str, str]:
+    """Extract scan duration and source tag as (ScanDuration, ScanDurationSource)."""
+    if (0x0018, 0x9073) in ds:
+        elem = ds[0x0018, 0x9073]
+        if elem.value is not None and elem.value != "":
+            duration = format_duration(elem.value)
+            if duration != "N/A":
+                return duration, "0018,9073"
+
+    try:
+        block = ds.private_block(0x0019, "GEMS_ACQU_01")
+        if 0x5A in block:
+            elem_val = block[0x5A].value
+            if elem_val is not None and elem_val != "":
+                try:
+                    sec = float(elem_val) / 1e6
+                    duration = format_duration(sec)
+                    if duration != "N/A":
+                        return duration, "0019,105A"
+                except (TypeError, ValueError):
+                    pass
+    except KeyError:
+        pass
+
+    if "siemens" in ds_value(ds, "Manufacturer", default="").casefold():
+        for element in ds:
+            if not element.tag.is_private or not isinstance(element.value, bytes):
+                continue
+            match = SIEMENS_TOTAL_SCAN_TIME_PATTERN.search(element.value)
+            if match is None:
+                continue
+            try:
+                sec = float(match.group(1).decode("ascii"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            duration = format_duration(sec)
+            if duration != "N/A":
+                tag_str = f"{element.tag.group:04X},{element.tag.elem:04X}"
+                return duration, f"{tag_str}:lTotalScanTimeSec"
+
+    return "N/A", "N/A"
+
+
 def direction_cosines(value: Any) -> tuple[float, ...] | None:
     if value is None or value == "":
         return None
@@ -1015,26 +1698,17 @@ def direction_cosines(value: Any) -> tuple[float, ...] | None:
     return cosines
 
 
-def phase_encoding_direction_patient(ds: pydicom.dataset.Dataset) -> str:
-    """Map the positive phase-encoding image axis to a biped patient direction."""
-    anatomical_orientation_type = ds_value(
-        ds,
-        "AnatomicalOrientationType",
-        default="BIPED",
-    ).upper()
-    if anatomical_orientation_type not in {"BIPED", "N/A"}:
-        return "N/A"
-
-    phase_axis = text_value(
-        in_plane_phase_encoding_direction_value(ds),
-        default="",
-    ).upper()
-    cosines = direction_cosines(image_orientation_patient_value(ds))
+def direction_from_cosines_and_axis(
+    cosines: tuple[float, ...] | None,
+    phase_axis: str,
+) -> str:
+    """Calculate the biped patient direction from cosines and in-plane phase axis."""
     if cosines is None:
         return "N/A"
-    if phase_axis == "ROW":
+    axis = phase_axis.strip().upper()
+    if axis == "ROW":
         vector = cosines[:3]
-    elif phase_axis in {"COL", "COLUMN"}:
+    elif axis in {"COL", "COLUMN"}:
         vector = cosines[3:]
     else:
         return "N/A"
@@ -1055,9 +1729,103 @@ def phase_encoding_direction_patient(ds: pydicom.dataset.Dataset) -> str:
     return f"{start}\N{RIGHTWARDS ARROW}{end}"
 
 
+def phase_encoding_direction_patient(ds: pydicom.dataset.Dataset) -> str:
+    """Map the positive phase-encoding image axis to a biped patient direction."""
+    anatomical_orientation_type = ds_value(
+        ds,
+        "AnatomicalOrientationType",
+        default="BIPED",
+    ).upper()
+    if anatomical_orientation_type not in {"BIPED", "N/A"}:
+        return "N/A"
+
+    phase_axis = text_value(
+        in_plane_phase_encoding_direction_value(ds),
+        default="",
+    )
+    cosines = direction_cosines(image_orientation_patient_value(ds))
+    return direction_from_cosines_and_axis(cosines, phase_axis)
+
+
+def _extract_sequence_attr(
+    frame_item: Any,
+    shared_sequence: Any | None,
+    top_level_ds: Any,
+    sequence_name: str,
+    attribute_name: str,
+) -> Any | None:
+    if frame_item is not None:
+        nested = getattr(frame_item, sequence_name, None)
+        if nested:
+            for subitem in nested:
+                val = getattr(subitem, attribute_name, None)
+                if val is not None and val != "":
+                    return val
+    if shared_sequence:
+        for item in shared_sequence:
+            nested = getattr(item, sequence_name, None)
+            if nested:
+                for subitem in nested:
+                    val = getattr(subitem, attribute_name, None)
+                    if val is not None and val != "":
+                        return val
+    val = getattr(top_level_ds, attribute_name, None)
+    if val is not None and val != "":
+        return val
+    return None
+
+
+def resolve_phase_encoding_direction(
+    ds: pydicom.dataset.Dataset,
+) -> tuple[str, bool]:
+    """Resolve PhaseEncodingDirectionPatient across frames.
+
+    Returns (ped_string, is_varying).
+    """
+    anatomical_orientation_type = ds_value(
+        ds,
+        "AnatomicalOrientationType",
+        default="BIPED",
+    ).upper()
+    if anatomical_orientation_type not in {"BIPED", "N/A"}:
+        return "N/A", False
+
+    per_frame = getattr(ds, "PerFrameFunctionalGroupsSequence", None)
+    if not per_frame:
+        return phase_encoding_direction_patient(ds), False
+
+    shared = getattr(ds, "SharedFunctionalGroupsSequence", None)
+    seen: set[str] = set()
+    unique_dirs: list[str] = []
+
+    for frame_item in per_frame:
+        iop = _extract_sequence_attr(
+            frame_item, shared, ds, "PlaneOrientationSequence", "ImageOrientationPatient"
+        )
+        ped = _extract_sequence_attr(
+            frame_item, shared, ds, "MRFOVGeometrySequence", "InPlanePhaseEncodingDirection"
+        )
+        cosines = direction_cosines(iop)
+        phase_axis = text_value(ped, default="")
+        d = direction_from_cosines_and_axis(cosines, phase_axis)
+        if d and d != "N/A" and d not in seen:
+            seen.add(d)
+            unique_dirs.append(d)
+
+    if not unique_dirs:
+        return phase_encoding_direction_patient(ds), False
+
+    if len(unique_dirs) > 1:
+        return "|".join(unique_dirs), True
+
+    return unique_dirs[0], False
+
+
 def fov_text(ds: pydicom.dataset.Dataset) -> str:
     try:
-        spacing = getattr(ds, "PixelSpacing")
+        spacing = getattr(ds, "PixelSpacing", None)
+        if spacing is None or spacing == "":
+            spacing = functional_group_value(ds, "PixelMeasuresSequence", "PixelSpacing")
         rows = int(getattr(ds, "Rows"))
         cols = int(getattr(ds, "Columns"))
         return f"{float(spacing[0]) * rows:g}x{float(spacing[1]) * cols:g}"
@@ -1175,62 +1943,79 @@ def file_context(
         ds_value(ds, "PatientID", default=""),
         patient_mode,
     )
-    siemens_ice_dims = tag_value(ds, 0x0021, 0x118E)
-    siemens_dim_channel, siemens_dim_echo = parse_siemens_ice_dims(siemens_ice_dims)
+    manufacturer = ds_value(ds, "Manufacturer")
+    is_siemens = "siemens" in manufacturer.casefold()
+    if is_siemens:
+        siemens_ice_dims = tag_value(ds, 0x0021, 0x118E)
+        siemens_dim_channel, siemens_dim_echo = parse_siemens_ice_dims(siemens_ice_dims)
+        siemens_channel_mixing = tag_value(ds, 0x0021, 0x1176)
+        siemens_coil_element = tag_value(ds, 0x0021, 0x114F)
+    else:
+        siemens_ice_dims = "N/A"
+        siemens_dim_channel = "N/A"
+        siemens_dim_echo = "N/A"
+        siemens_channel_mixing = "N/A"
+        siemens_coil_element = "N/A"
     series_description = ds_value(ds, "SeriesDescription")
     protocol_name = ds_value(ds, "ProtocolName")
     philips_image_type = image_type_parts(ds)
-    manufacturer = ds_value(ds, "Manufacturer")
     sequence_name = sequence_name_text(ds)
     modality = ds_value(ds, "Modality")
-    image_orientation_patient = image_orientation_patient_value(ds)
-    in_plane_phase_encoding_direction = in_plane_phase_encoding_direction_value(ds)
+    scan_duration, scan_duration_source = scan_duration_fields(ds)
+    enhanced_attrs, frame_varying = resolve_enhanced_attributes(ds)
+    ped_val, ped_varying = resolve_phase_encoding_direction(ds)
+    if ped_varying:
+        if frame_varying == "none":
+            frame_varying = "PhaseEncodingDirectionPatient"
+        elif frame_varying != "N/A":
+            frame_varying = f"{frame_varying}|PhaseEncodingDirectionPatient"
 
     row = {
         "SeriesUID": series_uid,
-        "SeriesUIDHash": series_uid_hash,
         "SOPInstanceUID": sop_uid,
         "SeriesNumber": series_number(ds),
         "SeriesDescription": series_description,
         "FileCount": "N/A",
-        "InstanceNumber": str(inst),
+        "InstanceNumber": ds_value(ds, "InstanceNumber"),
         "AcquisitionDate": ds_value(
             ds,
             "AcquisitionDate",
-            default=ds_value(ds, "StudyDate", default="unknown_date"),
+            default=ds_value(ds, "StudyDate", default="N/A"),
         ),
         "AcquisitionTime": ds_value(ds, "AcquisitionTime"),
         "PatientName": patient_name,
         "Modality": ds_value(ds, "Modality"),
-        "TR_ms": ds_value(ds, "RepetitionTime"),
-        "TE_ms": ds_value(ds, "EchoTime"),
+        "TR_ms": enhanced_attrs["TR_ms"],
+        "TE_ms": enhanced_attrs["TE_ms"],
         "EchoCount": "N/A",
         "EchoTimes_ms": "N/A",
         "FOV_HxW_mm": fov_text(ds),
         "Matrix_RowsxCols": matrix_text(ds),
-        "PixelBandwidth_Hz_per_px": ds_value(ds, "PixelBandwidth"),
-        "EchoTrainLength": ds_value(ds, "EchoTrainLength"),
-        "FlipAngle_deg": ds_value(ds, "FlipAngle"),
-        "SliceThickness_mm": ds_value(ds, "SliceThickness"),
-        "SpacingBetweenSlices_mm": ds_value(ds, "SpacingBetweenSlices"),
+        "PixelBandwidth_Hz_per_px": enhanced_attrs["PixelBandwidth_Hz_per_px"],
+        "EchoTrainLength": enhanced_attrs["EchoTrainLength"],
+        "FlipAngle_deg": enhanced_attrs["FlipAngle_deg"],
+        "SliceThickness_mm": enhanced_attrs["SliceThickness_mm"],
+        "SpacingBetweenSlices_mm": enhanced_attrs["SpacingBetweenSlices_mm"],
         "SliceLocation_mm": ds_value(ds, "SliceLocation"),
-        "NumberOfAverages": ds_value(ds, "NumberOfAverages"),
+        "NumberOfAverages": enhanced_attrs["NumberOfAverages"],
         "MagneticFieldStrength_T": ds_value(ds, "MagneticFieldStrength"),
         "ScanningSequence": ds_value(ds, "ScanningSequence"),
         "SequenceVariant": ds_value(ds, "SequenceVariant"),
         "SequenceName": sequence_name,
-        "InversionTime_ms": ds_value(ds, "InversionTime"),
+        "InversionTime_ms": enhanced_attrs["InversionTime_ms"],
         "EchoNumbers": ds_value(ds, "EchoNumbers"),
         "AcquisitionMatrix": ds_value(ds, "AcquisitionMatrix"),
         "NumberOfPhaseEncodingSteps": ds_value(ds, "NumberOfPhaseEncodingSteps"),
         "PercentSampling": ds_value(ds, "PercentSampling"),
         "PercentPhaseFOV": ds_value(ds, "PercentPhaseFieldOfView"),
-        "ParallelReductionFactorInPlane": text_value(
-            parallel_reduction_factor_in_plane_value(ds)
-        ),
+        "ParallelReductionFactorInPlane": enhanced_attrs["ParallelReductionFactorInPlane"],
         "SAR": ds_value(ds, "SAR"),
-        "InPlanePhaseEncodingDirection": text_value(in_plane_phase_encoding_direction),
-        "PhaseEncodingDirectionPatient": phase_encoding_direction_patient(ds),
+        "ScanDuration": scan_duration,
+        "ScanDurationSource": scan_duration_source,
+        "NumberOfFrames": ds_value(ds, "NumberOfFrames"),
+        "FrameVaryingAttributes": frame_varying,
+        "InPlanePhaseEncodingDirection": enhanced_attrs["InPlanePhaseEncodingDirection"],
+        "PhaseEncodingDirectionPatient": ped_val,
         "Manufacturer": manufacturer,
         "ManufacturerModelName": ds_value(ds, "ManufacturerModelName"),
         "ReceiveCoilName": ds_value(ds, "ReceiveCoilName"),
@@ -1240,9 +2025,9 @@ def file_context(
         "MRAcquisitionType": ds_value(ds, "MRAcquisitionType"),
         "Rows": ds_value(ds, "Rows"),
         "Columns": ds_value(ds, "Columns"),
-        "PixelSpacing": pixel_spacing(ds),
-        "ImagePositionPatient": ds_value(ds, "ImagePositionPatient"),
-        "ImageOrientationPatient": text_value(image_orientation_patient),
+        "PixelSpacing": enhanced_attrs["PixelSpacing"],
+        "ImagePositionPatient": text_value(image_position_patient_value(ds)),
+        "ImageOrientationPatient": enhanced_attrs["ImageOrientationPatient"],
         "PatientPosition": ds_value(ds, "PatientPosition"),
         "FrameOfReferenceUID": ds_value(ds, "FrameOfReferenceUID"),
         "StudyInstanceUID": ds_value(ds, "StudyInstanceUID"),
@@ -1254,8 +2039,8 @@ def file_context(
         "PatientIDHash": patient_id_hash,
         "PatientNameHash": patient_hash,
         "SOPClassUID": ds_value(ds, "SOPClassUID"),
-        "SiemensChannelMixing": tag_value(ds, 0x0021, 0x1176),
-        "SiemensCoilElement": tag_value(ds, 0x0021, 0x114F),
+        "SiemensChannelMixing": siemens_channel_mixing,
+        "SiemensCoilElement": siemens_coil_element,
         "CoilElementCount": "N/A",
         "CoilElements": "N/A",
         "SiemensIceDims": siemens_ice_dims,
@@ -1270,7 +2055,9 @@ def file_context(
         "TransducerData": ds_value(ds, "TransducerData"),
         "TransducerType": ds_value(ds, "TransducerType"),
         "MechanicalIndex": ds_value(ds, "MechanicalIndex"),
-        "ThermalIndex": ds_value(ds, "ThermalIndex"),
+        "SoftTissueThermalIndex": ds_value(ds, "SoftTissueThermalIndex"),
+        "BoneThermalIndex": ds_value(ds, "BoneThermalIndex"),
+        "CranialThermalIndex": ds_value(ds, "CranialThermalIndex"),
         "UltrasoundColorDataPresent": ds_value(ds, "UltrasoundColorDataPresent"),
         "FrameTime_ms": ds_value(ds, "FrameTime"),
         "DistanceSourceToDetector_mm": ds_value(ds, "DistanceSourceToDetector"),
@@ -1283,9 +2070,28 @@ def file_context(
     for spec in dicom_tag_specs:
         row[spec.column] = dicom_tag_value(ds, spec.tag)
 
+    study_instance_uid = ds_value(ds, "StudyInstanceUID", default="")
+    study_date = safe_date(
+        ds_value(
+            ds, "StudyDate", default=ds_value(ds, "AcquisitionDate", default="unknown_date")
+        )
+    )
+    device_folder = device_folder_name(manufacturer, ds_value(ds, "ManufacturerModelName"))
+    patient_id_raw = ds_value(ds, "PatientID", default="")
+    issuer = ds_value(ds, "IssuerOfPatientID", default="")
+    study_key = compute_study_key(study_instance_uid)
+    patient_key = compute_patient_key(patient_id_raw, issuer, patient_mode)
+
     return {
-        "acquisition_date": ds_value(
-            ds, "AcquisitionDate", default=ds_value(ds, "StudyDate", default="unknown_date")
+        "study_instance_uid": study_instance_uid,
+        "study_date": study_date,
+        "study_key": study_key,
+        "patient_key": patient_key,
+        "device_folder": device_folder,
+        "acquisition_date": safe_date(
+            ds_value(
+                ds, "AcquisitionDate", default=ds_value(ds, "StudyDate", default="unknown_date")
+            )
         ),
         "acquisition_number": ds_value(ds, "AcquisitionNumber", default=""),
         "series_uid": series_uid,
@@ -1301,7 +2107,11 @@ def file_context(
         "instance_number": str(inst),
         "instance_number_6": f"{inst:06d}",
         "echo_time_ms": safe_name(float_text(getattr(ds, "EchoTime", "NA"))),
-        "siemens_coil_element": safe_name(tag_value(ds, 0x0021, 0x114F)),
+        "siemens_coil_element": (
+            safe_name(siemens_coil_element, fallback="NA")
+            if is_siemens and siemens_coil_element != "N/A"
+            else "NA"
+        ),
         "is_philips": "philips" in manufacturer.casefold(),
         "is_philips_mr": "philips" in manufacturer.casefold() and modality == "MR",
         "modality": modality,
@@ -1325,22 +2135,30 @@ def should_skip(path: Path, input_root: Path, output_root: Path, options: Organi
     return False
 
 
-def iter_candidate_files(input_root: Path, output_root: Path, options: OrganizeOptions):
-    for root, dirnames, filenames in os.walk(input_root):
-        root_path = Path(root)
-        kept_dirnames = []
-        for dirname in sorted(dirnames):
-            dir_path = root_path / dirname
-            if should_prune_dir(dir_path, input_root, output_root, options):
-                continue
-            kept_dirnames.append(dirname)
-        dirnames[:] = kept_dirnames
+def classify_prune_dir(
+    dir_path: Path,
+    input_root: Path,
+    output_root: Path,
+    options: OrganizeOptions,
+) -> str | None:
+    try:
+        dir_path.relative_to(output_root)
+        return "output_root"
+    except ValueError:
+        pass
+    resolved_dir = dir_path.resolve()
+    resolved_out = output_root.resolve()
+    if resolved_dir == resolved_out or (
+        resolved_out.exists() and resolved_dir.is_relative_to(resolved_out)
+    ):
+        return "output_root"
 
-        for filename in sorted(filenames):
-            path = root_path / filename
-            if should_skip(path, input_root, output_root, options):
-                continue
-            yield path
+    rel_parts = dir_path.relative_to(input_root).parts
+    if not options.include_hidden and any(part.startswith(".") for part in rel_parts):
+        return "hidden"
+    if not options.include_organized and any(is_organized_dir_name(part) for part in rel_parts):
+        return "organized"
+    return None
 
 
 def should_prune_dir(
@@ -1349,28 +2167,144 @@ def should_prune_dir(
     output_root: Path,
     options: OrganizeOptions,
 ) -> bool:
-    try:
-        path.relative_to(output_root)
-        return True
-    except ValueError:
-        pass
+    return classify_prune_dir(path, input_root, output_root, options) is not None
 
-    rel_parts = path.relative_to(input_root).parts
-    if not options.include_hidden and any(part.startswith(".") for part in rel_parts):
-        return True
-    if not options.include_organized and any(is_organized_dir_name(part) for part in rel_parts):
-        return True
-    return False
+
+def scan_candidates(
+    input_root: Path,
+    output_root: Path,
+    options: OrganizeOptions,
+    cancel_event: threading.Event | None = None,
+) -> tuple[list[Path], list[Path], list[dict[str, str]]]:
+    """Scan input_root for DICOM candidate files, hidden files, and excluded directories."""
+    candidates: list[Path] = []
+    hidden_files: list[Path] = []
+    excluded_dirs: list[dict[str, str]] = []
+    resolved_out = output_root.resolve()
+
+    for root, dirnames, filenames in os.walk(input_root):
+        if cancel_event is not None and cancel_event.is_set():
+            break
+        root_path = Path(root)
+        kept_dirnames = []
+        for dirname in sorted(dirnames):
+            dir_path = root_path / dirname
+            prune_reason = classify_prune_dir(dir_path, input_root, output_root, options)
+            if prune_reason is not None:
+                excluded_dirs.append({
+                    "path": dir_path.relative_to(input_root).as_posix(),
+                    "reason": prune_reason,
+                })
+                continue
+            kept_dirnames.append(dirname)
+        dirnames[:] = kept_dirnames
+
+        for filename in sorted(filenames):
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            path = root_path / filename
+
+            # Check if within output_root
+            is_out = False
+            try:
+                path.relative_to(output_root)
+                is_out = True
+            except ValueError:
+                if path.is_symlink():
+                    resolved_f = path.resolve()
+                    if resolved_out.exists() and resolved_f.is_relative_to(resolved_out):
+                        is_out = True
+            if is_out:
+                continue
+
+            rel_parts = path.relative_to(input_root).parts
+            if not options.include_organized and any(is_organized_dir_name(p) for p in rel_parts):
+                continue
+
+            if not options.include_hidden and any(part.startswith(".") for part in rel_parts):
+                if filename.startswith("."):
+                    hidden_files.append(path)
+                continue
+
+            candidates.append(path)
+
+    return candidates, hidden_files, excluded_dirs
+
+
+def iter_candidate_files(input_root: Path, output_root: Path, options: OrganizeOptions):
+    candidates, _hidden, _dirs = scan_candidates(input_root, output_root, options)
+    yield from candidates
+
+
+def classify_dicom_file(path: Path, force: bool) -> HeaderReadResult:
+    # 1. Read first 132 bytes to check DICM prefix
+    has_dicm = False
+    try:
+        with path.open("rb") as f:
+            header = f.read(132)
+            has_dicm = len(header) >= 132 and header[128:132] == b"DICM"
+    except PermissionError as exc:
+        return HeaderReadResult(None, "permission_denied", str(exc))
+    except OSError as exc:
+        return HeaderReadResult(None, "io_error", str(exc))
+
+    # 2. Read with pydicom
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ds = pydicom.dcmread(str(path), stop_before_pixels=True, force=force)
+    except PermissionError as exc:
+        return HeaderReadResult(None, "permission_denied", str(exc))
+    except OSError as exc:
+        return HeaderReadResult(None, "io_error", str(exc))
+    except pydicom.errors.InvalidDicomError as exc:
+        reason = "read_error" if has_dicm else "not_dicom"
+        return HeaderReadResult(None, reason, str(exc))
+    except Exception as exc:
+        reason = "read_error" if has_dicm else "not_dicom"
+        return HeaderReadResult(None, reason, str(exc))
+
+    # 3. Check for DICOMDIR
+    file_meta = getattr(ds, "file_meta", None)
+    sop_class = getattr(file_meta, "MediaStorageSOPClassUID", None) if file_meta else None
+    if (
+        str(sop_class) == "1.2.840.10008.1.3.10"
+        or str(getattr(ds, "SOPClassUID", None)) == "1.2.840.10008.1.3.10"
+    ):
+        return HeaderReadResult(None, "dicomdir", "DICOMDIR media storage directory")
+
+    # 4. Check for SeriesInstanceUID and SOPInstanceUID
+    has_series = hasattr(ds, "SeriesInstanceUID") and str(ds.SeriesInstanceUID).strip() != ""
+    has_sop = hasattr(ds, "SOPInstanceUID") and str(ds.SOPInstanceUID).strip() != ""
+    if has_series and has_sop:
+        return HeaderReadResult(ds, "N/A", "N/A")
+
+    # 5. Check if has_dicm but no transfer syntax or empty dataset
+    has_ts = file_meta is not None and getattr(file_meta, "TransferSyntaxUID", None) is not None
+    if has_dicm and (not has_ts or len(ds) == 0):
+        return HeaderReadResult(
+            None, "read_error", "DICM prefix found but no data elements could be read"
+        )
+
+    # 6. Check if has_dicm or SOPClassUID / Modality / StudyInstanceUID
+    has_marker = any(
+        hasattr(ds, attr) and str(getattr(ds, attr)).strip() != ""
+        for attr in ("SOPClassUID", "Modality", "StudyInstanceUID")
+    )
+    if has_dicm or has_marker:
+        missing = []
+        if not has_series:
+            missing.append("SeriesInstanceUID")
+        if not has_sop:
+            missing.append("SOPInstanceUID")
+        return HeaderReadResult(None, "missing_required_uid", f"missing {' and '.join(missing)}")
+
+    # 7. Otherwise not_dicom
+    return HeaderReadResult(None, "not_dicom", "not a DICOM file")
 
 
 def read_dicom_header(path: Path, force: bool) -> pydicom.dataset.Dataset | None:
-    try:
-        ds = pydicom.dcmread(str(path), stop_before_pixels=True, force=force)
-    except Exception:
-        return None
-    if not hasattr(ds, "SeriesInstanceUID") or not hasattr(ds, "SOPInstanceUID"):
-        return None
-    return ds
+    return classify_dicom_file(path, force).dataset
 
 
 def format_template(template: str, context: dict[str, Any], label: str) -> str:
@@ -1381,13 +2315,24 @@ def format_template(template: str, context: dict[str, Any], label: str) -> str:
         raise ValueError(f"Unknown key in {label} template: {key}") from exc
 
 
-def resolve_collision(path: Path, seen: set[Path], if_exists: str) -> Path | None:
+def resolve_collision(
+    path: Path,
+    seen: set[Path],
+    if_exists: str,
+    *,
+    dry_run: bool = False,
+) -> Path | None:
     if path in seen:
         return suffixed_path(path, seen)
     if not path.exists():
         return path
     if if_exists == "error":
-        raise FileExistsError(f"Target exists: {path}")
+        if dry_run:
+            return path
+        raise FileExistsError(
+            f"Target exists: {path}. "
+            "Re-run with --if-exists skip to continue into an existing output folder."
+        )
     if if_exists == "skip":
         return None
     if if_exists == "overwrite":
@@ -1409,83 +2354,440 @@ def suffixed_path(path: Path, seen: set[Path]) -> Path:
         index += 1
 
 
-def resolve_series_dir(
-    base_dir: Path,
-    series_key: tuple[str, str],
-    assigned_dirs: dict[tuple[str, str], Path],
-    used_dirs: set[Path],
-) -> Path:
-    if series_key in assigned_dirs:
-        return assigned_dirs[series_key]
-
-    candidate = unique_series_dir(base_dir, used_dirs)
-    assigned_dirs[series_key] = candidate
-    used_dirs.add(candidate)
-    return candidate
-
-
-def unique_series_dir(base_dir: Path, used_dirs: set[Path]) -> Path:
-    if base_dir not in used_dirs:
-        return base_dir
-
-    index = 2
-    while True:
-        candidate = base_dir.with_name(f"{base_dir.name}_{index:02d}")
-        if candidate not in used_dirs:
-            return candidate
-        index += 1
-
-
 def assign_series_dirs(
-    base_dir_by_series: dict[tuple[str, str, tuple[str, ...]], Path],
-    series_order: list[tuple[str, str, tuple[str, ...]]],
-) -> dict[tuple[str, str, tuple[str, ...]], Path]:
-    series_by_base_dir: dict[Path, list[tuple[str, str, tuple[str, ...]]]] = defaultdict(list)
+    base_dir_by_series: dict[Any, Path],
+    series_order: list[Any],
+) -> dict[Any, Path]:
+    reserved = set(base_dir_by_series.values())  # Do not steal original names of other series
+    counts = Counter(base_dir_by_series[key] for key in series_order)
+    used: set[Path] = set()
+    assigned: dict[Any, Path] = {}
     for series_key in series_order:
-        series_by_base_dir[base_dir_by_series[series_key]].append(series_key)
-
-    assigned: dict[tuple[str, str, tuple[str, ...]], Path] = {}
-    for base_dir, series_keys in series_by_base_dir.items():
-        if len(series_keys) == 1:
-            assigned[series_keys[0]] = base_dir
+        base_dir = base_dir_by_series[series_key]
+        if counts[base_dir] == 1 and base_dir not in used:
+            assigned[series_key] = base_dir
+            used.add(base_dir)
             continue
-        for index, series_key in enumerate(series_keys, start=1):
-            assigned[series_key] = base_dir.with_name(f"{base_dir.name}_{index:02d}")
+        index = 1
+        while True:
+            candidate = base_dir.with_name(f"{base_dir.name}_{index:02d}")
+            if candidate not in used and candidate not in reserved:
+                break
+            index += 1
+        assigned[series_key] = candidate
+        used.add(candidate)
     return assigned
 
 
-def materialize(source: Path, destination: Path, action: str, overwrite: bool) -> None:
-    if overwrite and destination.exists():
-        destination.unlink()
-    if action == "copy":
-        shutil.copy2(source, destination)
-    elif action == "symlink":
-        destination.symlink_to(source)
-    elif action == "hardlink":
-        os.link(source, destination)
-    elif action == "move":
-        shutil.move(source, destination)
-    else:
+def compute_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while chunk := f.read(1024 * 1024):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def materialize(
+    source: Path,
+    destination: Path,
+    action: str,
+    overwrite: bool,
+    *,
+    checksum: bool = False,
+) -> str:
+    """Materialize source at destination using specified action.
+
+    Returns the source SHA-256 hex digest when checksum is True, otherwise "N/A".
+    """
+    if action not in ACTIONS:
         raise ValueError(f"Unsupported action: {action}")
+    if not overwrite and (destination.exists() or destination.is_symlink()):
+        raise FileExistsError(
+            f"Target exists: {destination}. "
+            "Re-run with --if-exists skip to continue into an existing output folder."
+        )
+
+    src_size = source.stat().st_size
+    src_sha = compute_sha256(source) if checksum else "N/A"
+
+    if action == "move":
+        try:
+            os.replace(source, destination)  # Atomic on same filesystem
+            if destination.stat().st_size != src_size:
+                raise IntegrityError(f"File size mismatch after move: {destination}")
+            return src_sha
+        except OSError as exc:
+            if exc.errno != errno.EXDEV:
+                raise
+
+    temp_path = destination.with_name(f".{destination.name}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        if action in ("copy", "move"):
+            shutil.copy2(source, temp_path)
+            if temp_path.stat().st_size != src_size:
+                raise IntegrityError(
+                    f"Size mismatch during copy: {temp_path.stat().st_size} != {src_size}"
+                )
+            if checksum:
+                dst_sha = compute_sha256(temp_path)
+                if dst_sha != src_sha:
+                    raise IntegrityError(
+                        f"SHA-256 mismatch during copy: {dst_sha} != {src_sha}"
+                    )
+        elif action == "symlink":
+            temp_path.symlink_to(source)
+            if temp_path.resolve() != source.resolve():
+                raise IntegrityError(
+                    f"Symlink does not resolve to source: {temp_path} -> {source}"
+                )
+        elif action == "hardlink":
+            os.link(source, temp_path)
+            if not os.path.samefile(source, temp_path):
+                raise IntegrityError(
+                    f"Hardlink is not the same file: {temp_path} and {source}"
+                )
+
+        os.replace(temp_path, destination)
+    except BaseException:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+    if action == "move":
+        source.unlink()
+
+    return src_sha
 
 
-def build_items(args: argparse.Namespace | OrganizeOptions) -> tuple[list[OrganizedItem], Counter[str]]:
-    options = normalize_options(args)
+def write_file_report(
+    output_root: Path,
+    input_root: Path,
+    records: list[FileRecord],
+) -> Path:
+    path = ensure_within_output_root(output_root, output_root / "file_report.csv")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, str]] = []
+    for record in records:
+        try:
+            source_rel = record.source.relative_to(input_root).as_posix()
+        except ValueError:
+            source_rel = str(record.source)
+
+        dup_rel = "N/A"
+        if record.duplicate_of is not None:
+            try:
+                dup_rel = record.duplicate_of.relative_to(input_root).as_posix()
+            except ValueError:
+                dup_rel = str(record.duplicate_of)
+
+        dest_rel = "N/A"
+        if record.destination is not None:
+            try:
+                dest_rel = record.destination.relative_to(output_root).as_posix()
+            except ValueError:
+                dest_rel = str(record.destination)
+
+        size_str = str(record.size_bytes) if record.size_bytes is not None else "N/A"
+
+        rows.append({
+            "SourceFileName": source_rel,
+            "Status": record.status,
+            "Reason": record.reason,
+            "Detail": record.detail,
+            "OrganizedFileName": dest_rel,
+            "DuplicateOf": dup_rel,
+            "SOPInstanceUID": record.sop_instance_uid,
+            "SeriesUID": record.series_uid,
+            "Modality": record.modality,
+            "SizeBytes": size_str,
+            "SHA256": record.sha256,
+        })
+    rows.sort(key=lambda r: r["SourceFileName"])
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=FILE_REPORT_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
+def collect_reports(output_root: Path, items: list[OrganizedItem]) -> list[str]:
+    reports: list[str] = ["file_report.csv"]
+    if (output_root / "all_series_summary.csv").exists():
+        reports.append("all_series_summary.csv")
+    group_dirs = sorted({item.destination.parent.parent for item in items}, key=lambda p: str(p))
+    for group_dir in group_dirs:
+        try:
+            rel_group = group_dir.relative_to(output_root).as_posix()
+            reports.append(f"{rel_group}/dicom_parameters.csv")
+            reports.append(f"{rel_group}/series_summary.csv")
+        except ValueError:
+            pass
+    reports.append("organize_summary.json")
+    return reports
+
+
+def check_previous_run(
+    output_root: Path,
+    layout: str | None = None,
+) -> tuple[str | None, list[str]]:
+    summary_path = output_root / "organize_summary.json"
+    if not summary_path.exists():
+        return None, []
+    warnings_list: list[str] = []
+    prev_status: str | None = None
+    try:
+        data = json.loads(summary_path.read_text(encoding="utf-8"))
+        raw_status = data.get("status")
+        if raw_status in ("running", "cancelled", "interrupted", "failed"):
+            prev_status = raw_status
+            warnings_list.append(
+                f"Previous run was not completed (status={prev_status}). "
+                "Re-run with --if-exists skip to continue into an existing output folder."
+            )
+        prev_schema = data.get("output_schema_version")
+        if prev_schema is None:
+            warnings_list.append(
+                "This output folder was created by an older version (0.1.x) with a different folder layout. "
+                "Organizing into this folder will duplicate files under the new structure, and the series summary "
+                "table will list both old and new series. Please use a new, empty output folder."
+            )
+        elif layout is not None:
+            prev_layout = data.get("layout")
+            if prev_layout and prev_layout != layout:
+                warnings_list.append(
+                    f"This output folder was created with layout '{prev_layout}', which differs from the "
+                    f"current layout '{layout}'. Organizing into this folder will mix different folder structures. "
+                    "Please use a new, empty output folder."
+                )
+    except Exception:
+        pass
+    return prev_status, warnings_list
+
+
+def find_existing_ancestor(path: Path) -> Path:
+    cur = path.resolve()
+    while not cur.exists():
+        cur = cur.parent
+    return cur
+
+
+def check_free_space(
+    items: list[OrganizedItem],
+    output_root: Path,
+    input_root: Path,
+    action: str,
+    space_check: bool,
+) -> dict[str, Any]:
+    if not space_check or not items:
+        return {"checked": False, "required_bytes": None, "free_bytes": None}
+
+    ancestor = find_existing_ancestor(output_root)
+    needs_check = False
+    if action == "copy":
+        needs_check = True
+    elif action == "move":
+        try:
+            in_dev = os.stat(input_root).st_dev
+            out_dev = os.stat(ancestor).st_dev
+            needs_check = in_dev != out_dev
+        except OSError:
+            needs_check = True
+
+    if not needs_check:
+        return {"checked": False, "required_bytes": None, "free_bytes": None}
+
+    total_bytes = 0
+    for item in items:
+        try:
+            total_bytes += item.source.stat().st_size
+        except OSError:
+            pass
+
+    margin = max(64 * 1024 * 1024, total_bytes // 50)
+    required = total_bytes + margin
+    usage = shutil.disk_usage(ancestor)
+    free = usage.free
+
+    if free < required:
+        def _fmt(b: int) -> str:
+            val = float(b)
+            for unit in ["B", "KiB", "MiB", "GiB", "TiB"]:
+                if val < 1024 or unit == "TiB":
+                    return f"{val:.1f} {unit}" if unit != "B" else f"{int(val)} B"
+                val /= 1024
+            return f"{b} B"
+
+        raise InsufficientSpaceError(
+            f"Insufficient free space on destination: required {_fmt(required)} ({required} bytes), "
+            f"available {_fmt(free)} ({free} bytes)"
+        )
+
+    return {"checked": True, "required_bytes": required, "free_bytes": free}
+
+
+def plan_organization(
+    options: OrganizeOptions,
+    progress: Callable[[ProgressEvent], None] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> tuple[
+    list[OrganizedItem],
+    list[FileRecord],
+    Counter[str],
+    list[dict[str, str]],
+    bool,
+    bool,
+]:
     input_root = options.input_root
     output_root = options.output_root
     stats: Counter[str] = Counter()
-    seen_destinations: set[Path] = set()
-    items: list[OrganizedItem] = []
-    dicom_tag_specs = parse_dicom_tag_specs(options.dicom_tags)
-    pending_sources: list[tuple[Path, dict[str, Any], str, tuple[str, str]]] = []
+    for r in SKIP_REASONS:
+        stats[f"skip_{r}"] = 0
+    stats["existing_output_conflicts"] = 0
 
-    for source in iter_candidate_files(input_root, output_root, options):
+    if progress:
+        progress(
+            ProgressEvent(
+                stage="discover",
+                done=0,
+                total=None,
+                message="Scanning input directory...",
+            )
+        )
+
+    candidates, hidden_files, excluded_dirs = scan_candidates(
+        input_root, output_root, options, cancel_event
+    )
+
+    if cancel_event is not None and cancel_event.is_set():
+        if progress:
+            progress(
+                ProgressEvent(
+                    stage="discover",
+                    done=len(candidates),
+                    total=len(candidates),
+                    message="Cancelled during discover",
+                )
+            )
+        return [], [], stats, excluded_dirs, False, True
+
+    if progress:
+        progress(
+            ProgressEvent(
+                stage="discover",
+                done=len(candidates),
+                total=len(candidates),
+                message=f"Found {len(candidates)} candidate files",
+            )
+        )
+
+    # Stage: read
+    total_candidates = len(candidates)
+    if progress:
+        progress(
+            ProgressEvent(
+                stage="read",
+                done=0,
+                total=total_candidates,
+                message="Reading headers...",
+            )
+        )
+
+    dicom_tag_specs = parse_dicom_tag_specs(options.dicom_tags)
+    pending_sources: list[tuple[Path, dict[str, Any], str, tuple[Any, ...], FileRecord]] = []
+    seen_sop_trackers: dict[str, _SopTracker] = {}
+    file_records: list[FileRecord] = []
+    limit_reached = False
+    read_count = 0
+
+    for i, source in enumerate(candidates, 1):
+        read_count = i
+        if cancel_event is not None and cancel_event.is_set():
+            if progress:
+                progress(
+                    ProgressEvent(
+                        stage="read",
+                        done=i - 1,
+                        total=total_candidates,
+                        message="Cancelled during read",
+                    )
+                )
+            return [], file_records, stats, excluded_dirs, False, True
+
         stats["candidate_files"] += 1
-        ds = read_dicom_header(source, force=options.force_read)
-        if ds is None:
-            stats["skipped_non_dicom"] += 1
+        try:
+            size_bytes = source.stat().st_size
+        except OSError:
+            size_bytes = None
+
+        read_result = classify_dicom_file(source, force=options.force_read)
+        if read_result.reason != "N/A":
+            stats[f"skip_{read_result.reason}"] += 1
+            if read_result.reason == "not_dicom":
+                stats["skipped_non_dicom"] += 1
             if options.verbose:
-                print(f"[skip] non-DICOM: {source}", file=sys.stderr)
+                print(
+                    f"[skip] {read_result.reason}: {source} ({read_result.detail})",
+                    file=sys.stderr,
+                )
+            file_records.append(
+                FileRecord(
+                    source=source,
+                    status="skipped",
+                    reason=read_result.reason,
+                    detail=read_result.detail,
+                    size_bytes=size_bytes,
+                )
+            )
+            if progress:
+                progress(ProgressEvent(stage="read", done=i, total=total_candidates))
+            continue
+
+        ds = read_result.dataset
+        assert ds is not None
+        sop_uid = ds_value(ds, "SOPInstanceUID")
+        series_uid = ds_value(ds, "SeriesInstanceUID")
+        modality = ds_value(ds, "Modality")
+
+        # Duplicate SOPInstanceUID check
+        is_identical_dup = False
+        is_conflict_dup = False
+        duplicate_of: Path | None = None
+        curr_sha: str | None = None
+
+        if sop_uid in seen_sop_trackers:
+            tracker = seen_sop_trackers[sop_uid]
+            if not tracker.hashes:
+                first_sha = compute_sha256(tracker.first_source)
+                tracker.first_record.sha256 = first_sha
+                tracker.hashes[first_sha] = tracker.first_source
+            curr_sha = compute_sha256(source)
+            if curr_sha in tracker.hashes:
+                is_identical_dup = True
+                duplicate_of = tracker.hashes[curr_sha]
+            else:
+                is_conflict_dup = True
+                tracker.hashes[curr_sha] = source
+                duplicate_of = tracker.first_source
+        if is_identical_dup:
+            stats["skip_duplicate_identical"] += 1
+            file_records.append(
+                FileRecord(
+                    source=source,
+                    status="skipped",
+                    reason="duplicate_identical",
+                    detail="identical SOPInstanceUID and content",
+                    duplicate_of=duplicate_of,
+                    sop_instance_uid=sop_uid,
+                    series_uid=series_uid,
+                    modality=modality,
+                    size_bytes=size_bytes,
+                    sha256=curr_sha if curr_sha is not None else "N/A",
+                )
+            )
+            if progress:
+                progress(ProgressEvent(stage="read", done=i, total=total_candidates))
             continue
 
         item_index = stats["dicom_files"] + 1
@@ -1497,50 +2799,242 @@ def build_items(args: argparse.Namespace | OrganizeOptions) -> tuple[list[Organi
             source,
             dicom_tag_specs,
         )
-        acquisition_date = context["acquisition_date"]
+        study_date = context["study_date"]
+        device_folder = context["device_folder"]
+        study_folder = compute_study_folder(
+            options.layout,
+            device_folder,
+            study_date,
+            context["study_key"],
+            context["patient_key"],
+        )
+
         filename = safe_name(format_template(options.file_template, context, "file"))
-        pending_sources.append((source, context, filename, (acquisition_date, context["series_uid"])))
+
+        rec = FileRecord(
+            source=source,
+            status="planned" if options.dry_run else ("listed" if options.list_only else "organized"),
+            reason="duplicate_conflict" if is_conflict_dup else "N/A",
+            detail="duplicate SOPInstanceUID with different content"
+            if is_conflict_dup
+            else "N/A",
+            duplicate_of=duplicate_of,
+            sop_instance_uid=sop_uid,
+            series_uid=series_uid,
+            modality=modality,
+            size_bytes=size_bytes,
+            sha256=curr_sha if curr_sha is not None else "N/A",
+        )
+        if sop_uid not in seen_sop_trackers:
+            seen_sop_trackers[sop_uid] = _SopTracker(first_source=source, first_record=rec)
+        if is_conflict_dup:
+            stats["duplicate_conflicts"] += 1
+
+        pending_sources.append(
+            (
+                source,
+                context,
+                filename,
+                (study_folder, context["series_uid"]),
+                rec,
+                study_folder,
+            )
+        )
+        file_records.append(rec)
         stats["dicom_files"] += 1
 
+        if progress:
+            progress(ProgressEvent(stage="read", done=i, total=total_candidates))
+
         if options.limit and stats["dicom_files"] >= options.limit:
+            limit_reached = True
             break
 
-    pending_assignments = resolved_series_assignments(pending_sources)
-    pending: list[tuple[Path, dict[str, Any], str, tuple[str, str, tuple[str, ...]]]] = []
-    series_order: list[tuple[str, str, tuple[str, ...]]] = []
-    base_dir_by_series: dict[tuple[str, str, tuple[str, ...]], Path] = {}
+    # Add hidden files to file_records
+    for hidden in hidden_files:
+        try:
+            h_size = hidden.stat().st_size
+        except OSError:
+            h_size = None
+        stats["skip_excluded_hidden"] += 1
+        file_records.append(
+            FileRecord(
+                source=hidden,
+                status="skipped",
+                reason="excluded_hidden",
+                detail="hidden file excluded by default",
+                size_bytes=h_size,
+            )
+        )
+
+    if progress:
+        if limit_reached:
+            progress(
+                ProgressEvent(
+                    stage="read",
+                    done=read_count,
+                    total=read_count,
+                    message=f"Limit of {options.limit} files reached",
+                )
+            )
+        else:
+            progress(
+                ProgressEvent(
+                    stage="read",
+                    done=total_candidates,
+                    total=total_candidates,
+                    message="Read completed",
+                )
+            )
+
+    # Stage: plan
+    if progress:
+        progress(
+            ProgressEvent(
+                stage="plan",
+                done=0,
+                total=len(pending_sources),
+                message="Planning destinations...",
+            )
+        )
+
+    if cancel_event is not None and cancel_event.is_set():
+        if progress:
+            progress(
+                ProgressEvent(
+                    stage="plan",
+                    done=0,
+                    total=len(pending_sources),
+                    message="Cancelled before planning",
+                )
+            )
+        return [], file_records, stats, excluded_dirs, limit_reached, True
+
+    pending_assignments = resolved_series_assignments(
+        [(s, c, f, k) for s, c, f, k, _r, _sf in pending_sources]
+    )
+    pending: list[tuple[Path, dict[str, Any], str, tuple[Any, ...], FileRecord, str]] = []
+    series_order: list[tuple[Any, ...]] = []
+    base_dir_by_series: dict[tuple[Any, ...], Path] = {}
     for (
         source,
         context,
         filename,
         _base_series_key,
+        rec,
+        study_folder,
     ), (series_key, series_context) in zip(pending_sources, pending_assignments):
         series_template_context = dict(context)
         series_template_context.update(series_context)
         series_dir_name = safe_name(
             format_template(options.series_dir_template, series_template_context, "series-dir")
         )
-        base_dir = output_root / context["acquisition_date"] / series_dir_name
+        base_dir = ensure_within_output_root(
+            output_root,
+            output_root / study_folder / series_dir_name,
+        )
         if series_key not in base_dir_by_series:
             base_dir_by_series[series_key] = base_dir
             series_order.append(series_key)
-        pending.append((source, context, filename, series_key))
+        pending.append((source, context, filename, series_key, rec, study_folder))
 
     series_dirs = assign_series_dirs(base_dir_by_series, series_order)
+    seen_destinations: set[Path] = set()
+    items: list[OrganizedItem] = []
 
-    for source, context, filename, series_key in pending:
+    for source, context, filename, series_key, rec, study_folder in pending:
         destination = series_dirs[series_key] / filename
-        resolved = resolve_collision(destination, seen_destinations, options.if_exists)
-        if resolved is None:
-            stats["skipped_existing"] += 1
+        series_folder_rel = series_dirs[series_key].relative_to(output_root).as_posix()
+        study_folder_rel = Path(study_folder).as_posix()
+
+        if options.list_only:
+            if destination in seen_destinations:
+                resolved = suffixed_path(destination, seen_destinations)
+            else:
+                resolved = destination
+            seen_destinations.add(resolved)
+            rec.destination = None
+            rec.status = "planned" if options.dry_run else "listed"
+            row = dict(context["row"])
+            row["OrganizedFileName"] = "N/A"
+            row["StudyFolder"] = study_folder_rel
+            row["SeriesFolder"] = series_folder_rel
+            items.append(OrganizedItem(source=source, destination=resolved, row=row))
             continue
 
+        resolved = resolve_collision(
+            destination,
+            seen_destinations,
+            options.if_exists,
+            dry_run=options.dry_run,
+        )
+        if resolved is None:
+            stats["skipped_existing"] += 1
+            stats["skip_existing_output"] += 1
+            rec.status = "skipped"
+            rec.reason = "existing_output"
+            rec.detail = "destination already exists and if_exists is skip"
+            rec.destination = destination
+            continue
+
+        resolved = ensure_within_output_root(output_root, resolved)
         seen_destinations.add(resolved)
+        rec.destination = resolved
         row = dict(context["row"])
         row["OrganizedFileName"] = resolved.relative_to(output_root).as_posix()
+        row["StudyFolder"] = study_folder_rel
+        row["SeriesFolder"] = series_folder_rel
         items.append(OrganizedItem(source=source, destination=resolved, row=row))
 
+        if options.dry_run and options.if_exists == "error":
+            if resolved.exists() or resolved.is_symlink():
+                stats["existing_output_conflicts"] += 1
+                rec.detail = "destination already exists in output folder"
+
+    if progress:
+        progress(
+            ProgressEvent(
+                stage="plan",
+                done=len(items),
+                total=len(items),
+                message=f"Planned {len(items)} files",
+            )
+        )
+
+    return items, file_records, stats, excluded_dirs, limit_reached, False
+
+
+def build_items(
+    args: argparse.Namespace | OrganizeOptions,
+) -> tuple[list[OrganizedItem], Counter[str]]:
+    options = normalize_options(args)
+    items, _records, stats, _excluded, _limit, _cancelled = plan_organization(options)
     return items, stats
+
+
+def existing_metadata_rows(
+    csv_path: Path, output_root: Path, replaced_names: set[str]
+) -> list[dict[str, str]]:
+    if not csv_path.exists():
+        return []
+    rows: list[dict[str, str]] = []
+    with csv_path.open(encoding="utf-8-sig", newline="") as handle:
+        for raw in csv.DictReader(handle):
+            name = (raw.get("OrganizedFileName") or "").strip()
+            if not name or name in replaced_names:
+                continue                      # Will be replaced by current rows
+            target = output_root / name
+            if not (target.exists() or target.is_symlink()):
+                continue                      # Drop rows whose target no longer exists
+            row = {key: (value or "N/A") for key, value in raw.items() if key}
+            if row.get("SeriesFolder", "N/A") == "N/A" and name:
+                parts = name.split("/")
+                if len(parts) >= 2:
+                    row["SeriesFolder"] = "/".join(parts[:-1])
+                if len(parts) >= 3 and row.get("StudyFolder", "N/A") == "N/A":
+                    row["StudyFolder"] = "/".join(parts[:-2])
+            rows.append(row)
+    return rows
 
 
 def write_metadata_tables(
@@ -1549,28 +3043,36 @@ def write_metadata_tables(
     profile_name: str,
     extra_metadata_columns: list[str] | None = None,
 ) -> None:
-    by_date: dict[str, list[OrganizedItem]] = defaultdict(list)
+    by_dir: dict[Path, list[OrganizedItem]] = defaultdict(list)
     for item in items:
-        by_date[item.row["AcquisitionDate"]].append(item)
+        by_dir[item.destination.parent.parent].append(item)
 
-    for acquisition_date, date_items in sorted(by_date.items()):
-        date_dir = output_root / acquisition_date
+    for group_dir, group_items in sorted(by_dir.items(), key=lambda x: str(x[0])):
+        ensure_within_output_root(output_root, group_dir)
+        group_dir.mkdir(parents=True, exist_ok=True)
+        replaced_names = {item.row["OrganizedFileName"] for item in group_items}
+        existing_rows = existing_metadata_rows(
+            group_dir / "dicom_parameters.csv", output_root, replaced_names
+        )
+        combined_rows = [item.row for item in group_items] + existing_rows
         rows = sorted(
-            (item.row for item in date_items),
+            combined_rows,
             key=lambda row: (
-                row["SeriesNumber"],
-                int(row["InstanceNumber"]) if row["InstanceNumber"].isdigit() else 0,
-                row["OrganizedFileName"],
+                str(row.get("SeriesNumber", "")),
+                int(row["InstanceNumber"])
+                if str(row.get("InstanceNumber", "")).isdigit()
+                else 0,
+                str(row.get("OrganizedFileName", "")),
             ),
         )
         profile_rows = add_series_aggregates(metadata_rows(rows, profile_name))
         write_csv(
-            date_dir / "dicom_parameters.csv",
+            group_dir / "dicom_parameters.csv",
             metadata_columns_for_profile(profile_name, profile_rows, extra_metadata_columns),
             profile_rows,
         )
         write_csv(
-            date_dir / "series_summary.csv",
+            group_dir / "series_summary.csv",
             summary_columns_for_profile(
                 profile_name,
                 profile_rows,
@@ -1582,12 +3084,54 @@ def write_metadata_tables(
                 extra_metadata_columns,
             ),
         )
+    write_all_series_summary(output_root)
+
+
+def write_all_series_summary(output_root: Path) -> Path | None:
+    summary_files = sorted(
+        [
+            p
+            for p in output_root.rglob("series_summary.csv")
+            if p.is_file() and p.name == "series_summary.csv"
+        ],
+        key=lambda p: p.as_posix(),
+    )
+    if not summary_files:
+        return None
+
+    all_rows: list[dict[str, str]] = []
+    seen_columns: list[str] = ["StudyFolder", "SeriesFolder"]
+    known_cols_set = set(seen_columns)
+
+    for summary_path in summary_files:
+        study_folder_default = summary_path.parent.relative_to(output_root).as_posix()
+        with summary_path.open(encoding="utf-8-sig", newline="") as h:
+            reader = csv.DictReader(h)
+            for col in reader.fieldnames or []:
+                if col not in known_cols_set:
+                    seen_columns.append(col)
+                    known_cols_set.add(col)
+            for raw_row in reader:
+                row = dict(raw_row)
+                if not row.get("StudyFolder") or row["StudyFolder"] == "N/A":
+                    row["StudyFolder"] = study_folder_default
+                if not row.get("SeriesFolder") or row["SeriesFolder"] == "N/A":
+                    org_file = row.get("OrganizedFileName", "")
+                    if org_file and org_file != "N/A":
+                        row["SeriesFolder"] = "/".join(org_file.split("/")[:-1])
+                    else:
+                        row["SeriesFolder"] = study_folder_default
+                all_rows.append(row)
+
+    out_path = output_root / "all_series_summary.csv"
+    write_csv(out_path, seen_columns, all_rows)
+    return out_path
 
 
 def write_csv(path: Path, columns: list[str], rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore", restval="N/A")
         writer.writeheader()
         writer.writerows(rows)
 
@@ -1605,6 +3149,9 @@ def series_value(series_rows: list[dict[str, str]], column: str) -> str:
 
 
 def series_group_key(row: dict[str, str]) -> str:
+    folder = row.get("SeriesFolder", "")
+    if folder and folder != "N/A":
+        return folder
     return row.get("OrganizedFileName", "").rsplit("/", 1)[0]
 
 
@@ -1616,14 +3163,15 @@ def add_series_aggregates(rows: list[dict[str, str]]) -> list[dict[str, str]]:
 
     aggregates: dict[str, dict[str, str]] = {}
     for series_key, series_rows in grouped.items():
-        echo_times = sorted(
-            {
-                row.get("TE_ms", "N/A")
-                for row in series_rows
-                if row.get("TE_ms", "N/A") != "N/A"
-            },
-            key=natural_key,
-        )
+        echo_times_set: set[str] = set()
+        for row in series_rows:
+            te_val = row.get("TE_ms", "N/A")
+            if te_val != "N/A":
+                for part in te_val.split("|"):
+                    part = part.strip()
+                    if part and part != "N/A":
+                        echo_times_set.add(part)
+        echo_times = sorted(echo_times_set, key=natural_key)
         coil_elements = sorted(
             {
                 row.get("SiemensCoilElement", "N/A")
@@ -1635,9 +3183,9 @@ def add_series_aggregates(rows: list[dict[str, str]]) -> list[dict[str, str]]:
         is_mr = any(row_profile_name(row) == "mr" for row in series_rows)
         aggregates[series_key] = {
             "FileCount": str(len(series_rows)),
-            "EchoCount": str(len(echo_times)) if is_mr else "N/A",
+            "EchoCount": str(len(echo_times)) if is_mr and echo_times else "N/A",
             "EchoTimes_ms": "|".join(echo_times) if echo_times else "N/A",
-            "CoilElementCount": str(len(coil_elements)) if is_mr else "N/A",
+            "CoilElementCount": str(len(coil_elements)) if is_mr and coil_elements else "N/A",
             "CoilElements": "|".join(coil_elements) if coil_elements else "N/A",
         }
 
@@ -1662,7 +3210,12 @@ def build_series_summary(
     columns = summary_columns_for_profile(profile_name, rows, extra_metadata_columns)
     summaries: list[dict[str, str]] = []
     for _series_dir, series_rows in sorted(
-        grouped.items(), key=lambda item: (item[1][0]["SeriesNumber"], item[0])
+        grouped.items(),
+        key=lambda item: (
+            str(item[1][0].get("StudyFolder", "")),
+            str(item[1][0].get("SeriesNumber", "")),
+            item[0],
+        ),
     ):
         summaries.append({column: series_value(series_rows, column) for column in columns})
     return summaries
@@ -1682,14 +3235,93 @@ def write_run_summary(
     options: OrganizeOptions,
     started_at: str,
     ended_at: str,
+    *,
+    status: str = "completed",
+    error: str | None = None,
+    planned_files: int | None = None,
+    not_processed_files: int = 0,
+    excluded_directories: list[dict[str, str]] | None = None,
+    limit_reached: bool = False,
+    space_check_info: dict[str, Any] | None = None,
+    previous_run_status: str | None = None,
+    warnings_list: list[str] | None = None,
+    reports: list[str] | None = None,
 ) -> None:
-    by_series = Counter(item.destination.parent.relative_to(output_root).as_posix() for item in items)
+    by_series = Counter(
+        item.row.get(
+            "SeriesFolder",
+            item.destination.parent.relative_to(output_root).as_posix()
+            if item.destination is not None
+            else "N/A",
+        )
+        for item in items
+    )
     by_date = Counter(item.row["AcquisitionDate"] for item in items)
-    summary_counts = summarize_items(items, stats, output_root, options.profile)
+    group_folders = Counter(
+        item.row.get(
+            "StudyFolder",
+            item.destination.parent.parent.relative_to(output_root).as_posix()
+            if item.destination is not None
+            else "N/A",
+        )
+        for item in items
+    )
+    study_count = len(
+        {
+            item.row.get("StudyInstanceUID")
+            for item in items
+            if item.row.get("StudyInstanceUID") and item.row.get("StudyInstanceUID") != "N/A"
+        }
+    )
+    summary_counts = summarize_items(
+        items,
+        stats,
+        output_root,
+        options.profile,
+        status=status,
+        list_only=options.list_only,
+    )
+
+    skipped_by_reason: dict[str, int] = {}
+    for reason in SKIP_REASONS:
+        count = stats.get(f"skip_{reason}", 0)
+        if count > 0:
+            skipped_by_reason[reason] = count
+
     summary = {
+        "output_schema_version": OUTPUT_SCHEMA_VERSION,
+        "software": {
+            "name": "dicom-organizer",
+            "version": package_version(),
+            "python": sys.version.split()[0],
+            "pydicom": pydicom.__version__,
+            "platform": platform.platform(),
+        },
+        "options": {
+            "action": options.action,
+            "if_exists": options.if_exists,
+            "dry_run": options.dry_run,
+            "force_read": options.force_read,
+            "include_hidden": options.include_hidden,
+            "include_organized": options.include_organized,
+            "limit": options.limit,
+            "series_dir_template": options.series_dir_template,
+            "file_template": options.file_template,
+            "profile": options.profile,
+            "patient_mode": options.patient_mode,
+            "dicom_tags": list(options.dicom_tags),
+            "checksum": options.checksum,
+            "space_check": options.space_check,
+            "list_only": options.list_only,
+            "layout": options.layout,
+            "config_file": options.config_file,
+        },
         "started_at": started_at,
         "ended_at": ended_at,
-        "status": "dry_run" if options.dry_run else "completed",
+        "status": status,
+        "error": error,
+        "config_file": options.config_file,
+        "checksum": options.checksum,
         "input_root": str(options.input_root),
         "output_root": str(output_root),
         "action": options.action,
@@ -1699,19 +3331,40 @@ def write_run_summary(
         "patient_mode": options.patient_mode,
         "dicom_tags": list(options.dicom_tags),
         "candidate_files": stats["candidate_files"],
-        "organized_files": len(items),
+        "planned_files": planned_files if planned_files is not None else len(items),
+        "organized_files": 0 if options.list_only else len(items),
+        "not_processed_files": not_processed_files,
         "csv_target_files": summary_counts["csv_target_files"],
         "csv_excluded_files": summary_counts["csv_excluded_files"],
         "csv_excluded_non_image_files": summary_counts["csv_excluded_non_image_files"],
         "organized_files_by_modality": summary_counts["organized_files_by_modality"],
         "csv_target_files_by_modality": summary_counts["csv_target_files_by_modality"],
         "csv_excluded_files_by_modality": summary_counts["csv_excluded_files_by_modality"],
-        "skipped_non_dicom": stats["skipped_non_dicom"],
+        "skipped_by_reason": skipped_by_reason,
+        "skipped_non_dicom": skipped_by_reason.get("not_dicom", 0),
         "skipped_existing": stats["skipped_existing"],
+        "duplicate_conflicts": stats.get("duplicate_conflicts", 0),
+        "existing_output_conflicts": stats.get("existing_output_conflicts", 0),
+        "excluded_directories": excluded_directories or [],
+        "limit_reached": limit_reached,
+        "space_check": space_check_info
+        or {"checked": False, "required_bytes": None, "free_bytes": None},
+        "previous_run_status": previous_run_status,
+        "warnings": warnings_list or [],
+        "privacy_notices": patient_data_notices(options),
+        "reports": reports or [],
+        "layout": options.layout,
+        "group_folders": dict(sorted(group_folders.items())),
+        "study_count": study_count,
+        "device_dates": dict(sorted(group_folders.items())),
         "acquisition_dates": dict(sorted(by_date.items())),
         "series_count": len(by_series),
     }
-    path = output_root / "organize_summary.json"
+    if options.list_only:
+        summary["list_only"] = True
+        summary["listed_files"] = len(items)
+
+    path = ensure_within_output_root(output_root, output_root / "organize_summary.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, ensure_ascii=False)
@@ -1723,18 +3376,51 @@ def summarize_items(
     stats: Counter[str],
     output_root: Path,
     profile_name: str = "auto",
+    status: str = "completed",
+    list_only: bool = False,
 ) -> dict[str, Any]:
     by_date = Counter(item.row["AcquisitionDate"] for item in items)
-    by_series = Counter(item.destination.parent.relative_to(output_root).as_posix() for item in items)
+    group_folders = Counter(
+        item.row.get(
+            "StudyFolder",
+            item.destination.parent.parent.relative_to(output_root).as_posix()
+            if item.destination is not None
+            else "N/A",
+        )
+        for item in items
+    )
+    by_series = Counter(
+        item.row.get(
+            "SeriesFolder",
+            item.destination.parent.relative_to(output_root).as_posix()
+            if item.destination is not None
+            else "N/A",
+        )
+        for item in items
+    )
+    study_count = len(
+        {
+            item.row.get("StudyInstanceUID")
+            for item in items
+            if item.row.get("StudyInstanceUID") and item.row.get("StudyInstanceUID") != "N/A"
+        }
+    )
     rows = [item.row for item in items]
     csv_target_rows = metadata_rows(rows, profile_name)
     csv_target_row_ids = {id(row) for row in csv_target_rows}
     csv_excluded_rows = [row for row in rows if id(row) not in csv_target_row_ids]
     csv_target_files = len(csv_target_rows)
     csv_excluded_files = len(items) - csv_target_files
-    return {
+
+    skipped_by_reason: dict[str, int] = {}
+    for reason in SKIP_REASONS:
+        count = stats.get(f"skip_{reason}", 0)
+        if count > 0:
+            skipped_by_reason[reason] = count
+
+    res: dict[str, Any] = {
         "candidate_files": stats["candidate_files"],
-        "organized_files": len(items),
+        "organized_files": 0 if list_only else len(items),
         "csv_target_files": csv_target_files,
         "csv_excluded_files": csv_excluded_files,
         "csv_excluded_non_image_files": csv_excluded_files,
@@ -1742,21 +3428,31 @@ def summarize_items(
         "csv_target_files_by_modality": modality_counts(csv_target_rows),
         "csv_excluded_files_by_modality": modality_counts(csv_excluded_rows),
         "series_count": len(by_series),
-        "skipped_non_dicom": stats["skipped_non_dicom"],
+        "skipped_non_dicom": skipped_by_reason.get("not_dicom", 0),
         "skipped_existing": stats["skipped_existing"],
+        "skipped_by_reason": skipped_by_reason,
+        "duplicate_conflicts": stats.get("duplicate_conflicts", 0),
+        "existing_output_conflicts": stats.get("existing_output_conflicts", 0),
+        "status": status,
+        "group_folders": dict(sorted(group_folders.items())),
+        "study_count": study_count,
+        "device_dates": dict(sorted(group_folders.items())),
         "acquisition_dates": dict(sorted(by_date.items())),
         "output_root": str(output_root),
         "profile": profile_name,
     }
+    if list_only:
+        res["list_only"] = True
+        res["listed_files"] = len(items)
+    return res
 
 
 def planned_metadata_outputs(output_root: Path, items: list[OrganizedItem]) -> list[str]:
-    dates = sorted({item.row["AcquisitionDate"] for item in items})
     outputs: list[str] = []
-    for acquisition_date in dates:
-        date_dir = output_root / acquisition_date
-        outputs.append((date_dir / "dicom_parameters.csv").as_posix())
-        outputs.append((date_dir / "series_summary.csv").as_posix())
+    group_dirs = sorted({item.destination.parent.parent for item in items}, key=lambda p: str(p))
+    for group_dir in group_dirs:
+        outputs.append((group_dir / "dicom_parameters.csv").as_posix())
+        outputs.append((group_dir / "series_summary.csv").as_posix())
     outputs.append((output_root / "organize_summary.json").as_posix())
     return outputs
 
@@ -1774,8 +3470,10 @@ def print_summary(
     profile_name: str = "auto",
     *,
     dry_run: bool = False,
+    status: str = "completed",
 ) -> None:
-    summary = summarize_items(items, stats, output_root, profile_name)
+    summary = summarize_items(items, stats, output_root, profile_name, status=status)
+    print(f"status={summary['status']}")
     print(f"profile={summary['profile']}")
     print(f"candidate_files={summary['candidate_files']}")
     print(f"organized_files={summary['organized_files']}")
@@ -1796,8 +3494,10 @@ def print_summary(
     print(f"series_count={summary['series_count']}")
     print(f"skipped_non_dicom={summary['skipped_non_dicom']}")
     print(f"skipped_existing={summary['skipped_existing']}")
-    for acquisition_date, count in summary["acquisition_dates"].items():
-        print(f"{acquisition_date}: files={count}")
+    print(f"skipped_by_reason={format_counts(summary.get('skipped_by_reason', {}))}")
+    print(f"duplicate_conflicts={summary.get('duplicate_conflicts', 0)}")
+    for device_date, count in summary.get("device_dates", {}).items():
+        print(f"{device_date}: files={count}")
     print(f"output_root={output_root}")
     if dry_run and items:
         print("planned_metadata_outputs:")
@@ -1805,49 +3505,532 @@ def print_summary(
             print(f"  {output}")
 
 
-def run(args: argparse.Namespace | OrganizeOptions, *, dry_run: bool | None = None) -> OrganizeResult:
+def make_cli_progress() -> Callable[[ProgressEvent], None]:
+    import time
+
+    last_update = 0.0
+    last_stage: str | None = None
+
+    def _progress(event: ProgressEvent) -> None:
+        nonlocal last_update, last_stage
+        now = time.monotonic()
+        if event.stage != last_stage:
+            if last_stage is not None:
+                sys.stderr.write("\n")
+            last_stage = event.stage
+            last_update = 0.0
+
+        is_terminal = (event.total is not None and event.done == event.total) or event.done == 0
+        if not is_terminal and (now - last_update < 0.1):
+            return
+        last_update = now
+
+        if event.total is not None:
+            msg = f"[{event.stage}] {event.done}/{event.total}"
+        else:
+            msg = f"[{event.stage}] {event.done}"
+        sys.stderr.write(f"\r{msg}")
+        sys.stderr.flush()
+        if (
+            event.total is not None
+            and event.done == event.total
+            and event.stage in ("copy", "write")
+        ):
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+
+    return _progress
+
+
+def run(
+    args: argparse.Namespace | OrganizeOptions,
+    *,
+    dry_run: bool | None = None,
+    progress: Callable[[ProgressEvent], None] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> OrganizeResult:
     options = normalize_options(args, dry_run=dry_run, validate=True)
     started_at = datetime.now(timezone.utc).isoformat()
 
-    items, stats = build_items(options)
-    dicom_tag_specs = parse_dicom_tag_specs(options.dicom_tags)
+    # Check previous run
+    previous_run_status, prev_warnings = check_previous_run(
+        options.output_root, layout=options.layout
+    )
+    warnings_list = list(prev_warnings)
+    notices = patient_data_notices(options)
 
-    if not options.dry_run:
-        for item in items:
+    if options.patient_mode != "keep" and options.dicom_tags:
+        for tag_str in options.dicom_tags:
+            raw_tag = tag_str.split("=", 1)[-1].strip() if "=" in tag_str else tag_str.strip()
+            try:
+                parsed_tag = parse_dicom_tag(raw_tag)
+                kw = keyword_for_tag(parsed_tag) or raw_tag
+            except Exception:
+                kw = raw_tag
+            if kw in DIRECT_IDENTIFIER_TAGS or raw_tag in DIRECT_IDENTIFIER_TAGS:
+                warnings_list.append(
+                    f"Custom DICOM tag '{tag_str}' ({kw}) may contain direct patient identifiers "
+                    f"and will be written verbatim to metadata CSV files regardless of --patient-mode {options.patient_mode}."
+                )
+
+    items, file_records, stats, excluded_dirs, limit_reached, cancelled = plan_organization(
+        options, progress=progress, cancel_event=cancel_event
+    )
+
+    if cancelled:
+        ended_at = datetime.now(timezone.utc).isoformat()
+        return OrganizeResult(
+            items=[],
+            stats=stats,
+            output_root=options.output_root,
+            started_at=started_at,
+            ended_at=ended_at,
+            dry_run=options.dry_run,
+            profile=options.profile,
+            status="cancelled",
+            file_records=file_records,
+            warnings=warnings_list,
+            previous_run_status=previous_run_status,
+            list_only=options.list_only,
+            privacy_notices=notices,
+        )
+
+    if options.dry_run:
+        if stats.get("existing_output_conflicts", 0) > 0:
+            n = stats["existing_output_conflicts"]
+            warnings_list.append(
+                f"{n} planned file(s) already exist at destination; real execution with --if-exists error "
+                "will abort on the first existing file. Re-run with --if-exists skip to continue into an "
+                "existing output folder, or use overwrite/rename."
+            )
+        ended_at = datetime.now(timezone.utc).isoformat()
+        return OrganizeResult(
+            items=items,
+            stats=stats,
+            output_root=options.output_root,
+            started_at=started_at,
+            ended_at=ended_at,
+            dry_run=True,
+            profile=options.profile,
+            status="dry_run",
+            file_records=file_records,
+            warnings=warnings_list,
+            previous_run_status=previous_run_status,
+            list_only=options.list_only,
+            privacy_notices=notices,
+        )
+
+    if options.list_only:
+        if progress:
+            progress(ProgressEvent(stage="write", done=0, total=None, message="Writing reports..."))
+
+        options.output_root.mkdir(parents=True, exist_ok=True)
+        extra_cols = [spec.column for spec in parse_dicom_tag_specs(options.dicom_tags)]
+        all_rows = sorted(
+            [item.row for item in items],
+            key=lambda row: (
+                str(row.get("StudyFolder", "")),
+                str(row.get("SeriesNumber", "")),
+                str(row.get("SeriesFolder", "")),
+                int(row["InstanceNumber"])
+                if str(row.get("InstanceNumber", "")).isdigit()
+                else 0,
+                str(row.get("SourceFileName", "")),
+            ),
+        )
+        profile_rows = add_series_aggregates(metadata_rows(all_rows, options.profile))
+        write_csv(
+            options.output_root / "all_dicom_parameters.csv",
+            metadata_columns_for_profile(options.profile, profile_rows, extra_cols),
+            profile_rows,
+        )
+        write_csv(
+            options.output_root / "all_series_summary.csv",
+            summary_columns_for_profile(options.profile, profile_rows, extra_cols),
+            build_series_summary(profile_rows, options.profile, extra_cols),
+        )
+        write_file_report(options.output_root, options.input_root, file_records)
+        reports_list = [
+            "all_dicom_parameters.csv",
+            "all_series_summary.csv",
+            "file_report.csv",
+            "organize_summary.json",
+        ]
+        ended_at = datetime.now(timezone.utc).isoformat()
+        write_run_summary(
+            options.output_root,
+            items,
+            stats,
+            options,
+            started_at,
+            ended_at,
+            status="completed",
+            error=None,
+            planned_files=len(items),
+            not_processed_files=0,
+            excluded_directories=excluded_dirs,
+            limit_reached=limit_reached,
+            space_check_info=None,
+            previous_run_status=previous_run_status,
+            warnings_list=warnings_list,
+            reports=reports_list,
+        )
+        if progress:
+            progress(
+                ProgressEvent(
+                    stage="write",
+                    done=1,
+                    total=1,
+                    message="Reports written successfully",
+                )
+            )
+        return OrganizeResult(
+            items=items,
+            stats=stats,
+            output_root=options.output_root,
+            started_at=started_at,
+            ended_at=ended_at,
+            dry_run=False,
+            profile=options.profile,
+            status="completed",
+            file_records=file_records,
+            warnings=warnings_list,
+            previous_run_status=previous_run_status,
+            list_only=True,
+            privacy_notices=notices,
+        )
+
+    space_check_info = check_free_space(
+        items,
+        options.output_root,
+        options.input_root,
+        options.action,
+        options.space_check,
+    )
+
+    planned_files = len(items)
+    records_by_dest = {rec.destination: rec for rec in file_records if rec.destination is not None}
+
+    # Write initial "running" summary
+    write_run_summary(
+        options.output_root,
+        [],
+        stats,
+        options,
+        started_at,
+        "",
+        status="running",
+        planned_files=planned_files,
+        not_processed_files=planned_files,
+        excluded_directories=excluded_dirs,
+        limit_reached=limit_reached,
+        space_check_info=space_check_info,
+        previous_run_status=previous_run_status,
+        warnings_list=warnings_list,
+    )
+
+    total_items = len(items)
+    if progress:
+        progress(ProgressEvent(stage="copy", done=0, total=total_items, message="Placing files..."))
+
+    placed_items: list[OrganizedItem] = []
+    run_status = "completed"
+    records_placed: set[Path] = set()
+
+    def _mark_remaining(reason: str):
+        for item in items[len(placed_items):]:
+            rec = records_by_dest.get(item.destination)
+            if rec is not None and rec.source not in records_placed:
+                rec.status = "not_processed"
+                rec.reason = reason
+                rec.detail = f"processing was {reason} before this file could be placed"
+
+    def _write_partial(st: str, err: str | None = None):
+        try:
+            write_metadata_tables(
+                options.output_root,
+                placed_items,
+                options.profile,
+                extra_metadata_columns=[
+                    spec.column for spec in parse_dicom_tag_specs(options.dicom_tags)
+                ],
+            )
+            write_file_report(options.output_root, options.input_root, file_records)
+            reports_list = collect_reports(options.output_root, placed_items)
+            write_run_summary(
+                options.output_root,
+                placed_items,
+                stats,
+                options,
+                started_at,
+                datetime.now(timezone.utc).isoformat(),
+                status=st,
+                error=err,
+                planned_files=planned_files,
+                not_processed_files=planned_files - len(placed_items),
+                excluded_directories=excluded_dirs,
+                limit_reached=limit_reached,
+                space_check_info=space_check_info,
+                previous_run_status=previous_run_status,
+                warnings_list=warnings_list,
+                reports=reports_list,
+            )
+        except Exception:
+            pass
+
+    try:
+        for idx, item in enumerate(items, 1):
+            if cancel_event is not None and cancel_event.is_set():
+                run_status = "cancelled"
+                _mark_remaining("cancelled")
+                _write_partial("cancelled")
+                if progress:
+                    progress(
+                        ProgressEvent(
+                            stage="copy",
+                            done=len(placed_items),
+                            total=total_items,
+                            message="Cancelled during copy",
+                        )
+                    )
+                break
+
             item.destination.parent.mkdir(parents=True, exist_ok=True)
-            materialize(
+            sha256 = materialize(
                 item.source,
                 item.destination,
                 action=options.action,
-                overwrite=options.if_exists == "overwrite",
+                overwrite=(options.if_exists == "overwrite"),
+                checksum=options.checksum,
             )
-        write_metadata_tables(
-            options.output_root,
-            items,
-            options.profile,
-            extra_metadata_columns=[spec.column for spec in dicom_tag_specs],
+            rec = records_by_dest.get(item.destination)
+            if rec is not None:
+                if sha256 != "N/A":
+                    rec.sha256 = sha256
+                records_placed.add(rec.source)
+
+            placed_items.append(item)
+            if progress and idx < total_items:
+                progress(ProgressEvent(stage="copy", done=idx, total=total_items))
+
+    except KeyboardInterrupt:
+        _mark_remaining("interrupted")
+        _write_partial("interrupted")
+        raise
+    except Exception as exc:
+        error_msg = f"{type(exc).__name__}: {exc}"
+        _mark_remaining("failed")
+        _write_partial("failed", error_msg)
+        raise
+
+    if run_status != "cancelled" and progress:
+        progress(
+            ProgressEvent(
+                stage="copy",
+                done=len(placed_items),
+                total=total_items,
+                message="Copy completed",
+            )
         )
-        ended_at = datetime.now(timezone.utc).isoformat()
-        write_run_summary(options.output_root, items, stats, options, started_at, ended_at)
-    else:
-        ended_at = datetime.now(timezone.utc).isoformat()
+
+    ended_at = datetime.now(timezone.utc).isoformat()
+
+    if run_status == "cancelled":
+        return OrganizeResult(
+            items=placed_items,
+            stats=stats,
+            output_root=options.output_root,
+            started_at=started_at,
+            ended_at=ended_at,
+            dry_run=False,
+            profile=options.profile,
+            status="cancelled",
+            file_records=file_records,
+            warnings=warnings_list,
+            previous_run_status=previous_run_status,
+            privacy_notices=notices,
+        )
+
+    if progress:
+        progress(ProgressEvent(stage="write", done=0, total=None, message="Writing reports..."))
+
+    write_metadata_tables(
+        options.output_root,
+        placed_items,
+        options.profile,
+        extra_metadata_columns=[
+            spec.column for spec in parse_dicom_tag_specs(options.dicom_tags)
+        ],
+    )
+    write_file_report(options.output_root, options.input_root, file_records)
+    reports_list = collect_reports(options.output_root, placed_items)
+    write_run_summary(
+        options.output_root,
+        placed_items,
+        stats,
+        options,
+        started_at,
+        ended_at,
+        status="completed",
+        error=None,
+        planned_files=planned_files,
+        not_processed_files=0,
+        excluded_directories=excluded_dirs,
+        limit_reached=limit_reached,
+        space_check_info=space_check_info,
+        previous_run_status=previous_run_status,
+        warnings_list=warnings_list,
+        reports=reports_list,
+    )
+
+    if progress:
+        progress(
+            ProgressEvent(
+                stage="write",
+                done=1,
+                total=1,
+                message="Reports written successfully",
+            )
+        )
 
     return OrganizeResult(
-        items=items,
+        items=placed_items,
         stats=stats,
         output_root=options.output_root,
         started_at=started_at,
         ended_at=ended_at,
-        dry_run=options.dry_run,
+        dry_run=False,
         profile=options.profile,
+        status="completed",
+        file_records=file_records,
+        warnings=warnings_list,
+        previous_run_status=previous_run_status,
+        privacy_notices=notices,
     )
 
 
-def main() -> int:
-    args = parse_args()
+def effective_config_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    """Build effective configuration dictionary from parsed arguments."""
+    effective: dict[str, Any] = {}
+    if getattr(args, "output", None) is not None:
+        effective["output"] = str(args.output)
+    effective["action"] = str(getattr(args, "action", "copy"))
+    effective["if_exists"] = str(getattr(args, "if_exists", "error"))
+    effective["profile"] = str(getattr(args, "profile", "auto"))
+    effective["patient_mode"] = str(getattr(args, "patient_mode", "keep"))
+    effective["layout"] = str(getattr(args, "layout", "device-date"))
+    effective["list_only"] = bool(getattr(args, "list_only", False))
+    tags = getattr(args, "dicom_tags", None)
+    if tags:
+        effective["dicom_tags"] = list(tags)
+    effective["force_read"] = bool(getattr(args, "force_read", True))
+    effective["include_hidden"] = bool(getattr(args, "include_hidden", False))
+    effective["include_organized"] = bool(getattr(args, "include_organized", False))
+    effective["series_dir_template"] = str(
+        getattr(args, "series_dir_template", DEFAULT_SERIES_DIR_TEMPLATE)
+    )
+    effective["file_template"] = str(
+        getattr(args, "file_template", DEFAULT_FILE_TEMPLATE)
+    )
+    effective["checksum"] = bool(getattr(args, "checksum", False))
+    effective["space_check"] = bool(getattr(args, "space_check", True))
+    effective["progress"] = bool(getattr(args, "progress", True))
+    return effective
+
+
+def run_self_test(report_path: Path | str | None = None) -> int:
+    from dicom_organizer.selftest import run_self_test as _run_self_test
+
+    return _run_self_test(report_path)
+
+
+def diagnostics_lines(config_file: str | None = None) -> list[str]:
+    """Return diagnostic lines for bug reports with sensitive paths sanitized."""
+    try:
+        import PySide6
+
+        pyside6_ver = getattr(PySide6, "__version__", "installed")
+    except ImportError:
+        pyside6_ver = "not installed"
+
+    import locale
 
     try:
-        result = run(args)
+        loc = f"{locale.getlocale()}"
+    except Exception:
+        loc = "unknown"
+
+    home = str(Path.home())
+
+    def mask_home(val: str | None) -> str:
+        if not val:
+            return "none"
+        if val == home or val.startswith(home + os.sep):
+            return "~" + val[len(home):]
+        return val
+
+    is_frozen = getattr(sys, "frozen", False)
+
+    lines = [
+        f"dicom-organizer: {package_version()}",
+        f"output_schema_version: {OUTPUT_SCHEMA_VERSION}",
+        f"python: {platform.python_version()}",
+        f"platform: {platform.platform()}",
+        f"pydicom: {pydicom.__version__}",
+        f"pyside6: {pyside6_ver}",
+        f"frozen: {'true' if is_frozen else 'false'}",
+        f"executable: {mask_home(sys.executable)}",
+        f"config_file: {mask_home(config_file)}",
+        f"locale: {loc}",
+    ]
+    return lines
+
+
+def main() -> int:
+    try:
+        args = parse_args()
+    except ValueError as exc:
+        print(f"dicom-organizer: error: {exc}", file=sys.stderr)
+        return 2
+
+    if getattr(args, "print_config", False):
+        effective = effective_config_from_args(args)
+        sys.stdout.write(config_to_toml(effective))
+        return 0
+
+    if getattr(args, "print_schema", False):
+        from dicom_organizer.columns import schema_document
+
+        sys.stdout.write(json.dumps(schema_document(), indent=2, ensure_ascii=False) + "\n")
+        return 0
+
+    if getattr(args, "self_test", False):
+        return run_self_test(getattr(args, "self_test_report", None))
+
+    if getattr(args, "diagnostics", False):
+        for line in diagnostics_lines(config_file=getattr(args, "config_file", None)):
+            print(line)
+        return 0
+
+    progress_callback = None
+    if getattr(args, "progress", True) and sys.stderr.isatty():
+        progress_callback = make_cli_progress()
+
+    try:
+        result = run(args, progress=progress_callback)
+    except KeyboardInterrupt:
+        print(
+            "Organization interrupted by user. If file placement had started, placed files and partial reports have been saved. "
+            "Re-run with --if-exists skip to continue into an existing output folder.",
+            file=sys.stderr,
+        )
+        return 130
+    except InsufficientSpaceError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except IntegrityError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     except FileNotFoundError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -1858,6 +4041,21 @@ def main() -> int:
         print(f"Failed while scanning: {exc}", file=sys.stderr)
         return 1
 
+    from dicom_organizer.messages import notice_text
+
+    for warning in result.warnings:
+        print(f"WARNING: {warning}", file=sys.stderr)
+
+    if result.dry_run:
+        for code in result.privacy_notices:
+            print(notice_text(code, "en"), file=sys.stderr)
+    elif not result.list_only and result.items:
+        print(notice_text("dicom_files_unchanged", "en"), file=sys.stderr)
+
+    if result.status == "cancelled":
+        print("Organization was cancelled.", file=sys.stderr)
+        return 1
+
     if not result.items:
         print("No DICOM files were organized.", file=sys.stderr)
         print_summary(
@@ -1866,6 +4064,7 @@ def main() -> int:
             result.output_root,
             result.profile,
             dry_run=result.dry_run,
+            status=result.status,
         )
         if result.stats["skipped_existing"] > 0:
             return 0
@@ -1877,6 +4076,7 @@ def main() -> int:
         result.output_root,
         result.profile,
         dry_run=result.dry_run,
+        status=result.status,
     )
     if result.dry_run:
         print("dry_run=true")

@@ -1,0 +1,47 @@
+name: Feature Request / 機能改善の提案
+description: Suggest an enhancement or new capability based on your workflow / 実業務のワークフローに基づく機能改善・新機能を提案する
+title: "✨ feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting a feature! `dicom-organizer` aims to be the primary tool for organizing local DICOMs, checking acquisition parameters, and passing clean data to downstream analysis.
+        機能提案をありがとうございます！本ツールは「ローカル DICOM を整理し、撮像条件を確かめ、次の作業に渡すときに最初に使われるツール」を目指しています。
+  - type: textarea
+    attributes:
+      label: Target Workflow and Use Case / どんな仕事・作業での利用ですか？
+      description: |
+        Please describe your actual workflow, role, and the task you are performing (e.g., retrospective MRI study, pre-processing for 3D Slicer / dcm2niix, clinical research audit).
+        具体的な業務内容、役割、行っている作業を教えてください（例: 過去のMR研究データ棚卸し、3D Slicer や dcm2niix の前処理、撮像条件の多施設比較など）。
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Current Workaround / 今はどうしていますか？
+      description: |
+        How do you currently accomplish this task without this feature? (e.g., manual Excel entry, shell scripts, custom Python).
+        現在、この機能がない状態でどのように対処されていますか？
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Frequency / 作業の頻度
+      description: How often do you or your team perform this workflow? (e.g., daily, weekly, per study batch). / どのくらいの頻度で行う作業ですか？
+      placeholder: "Weekly, per protocol batch"
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Expected Benefit / 何が楽になりますか？
+      description: |
+        How would the proposed change improve safety, accuracy, speed, or team collaboration?
+        この改善によって、どの作業の負担軽減・ミス防止・時間短縮につながりますか？
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Proposed Solution / 提案する解決方法・仕様のアイデア
+      description: Describe your proposed CLI option, GUI control, or CSV column if you have specific ideas.
+    validations:
+      required: false

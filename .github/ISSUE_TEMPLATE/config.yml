@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: GitHub Discussions / 質問・相談
+    url: https://github.com/SugimotoKohei/dicom-organizer/discussions
+    about: Ask questions, share workflows, or discuss ideas / 質問や使い方の相談、アイデアの共有
+  - name: Direct Contact / メールでの問い合わせ
+    url: mailto:sugimotokouhei@gmail.com
+    about: For private inquiries or users without GitHub accounts / GitHub アカウントをお持ちでない方や個別連絡
+  - name: Documentation / ドキュメント
+    url: https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/README.md
+    about: Guides, support matrix, and FAQ / 各種ガイド、対応範囲表、FAQ

@@ -1,0 +1,64 @@
+name: Bug Report / 不具合報告
+description: Report an issue or unexpected behavior / 不具合や想定外の挙動を報告する
+title: "🐛 bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue! Please do NOT include sensitive patient data, DICOM binary files, private machine paths, or screenshots containing personal information in public issues.
+        不具合報告ありがとうございます。公開 Issue には、患者情報（PHI）、実際の DICOM ファイル、個人名が含まれるパス、個人情報が写ったスクリーンショットなどを絶対に貼り付けないでください。
+  - type: checkboxes
+    attributes:
+      label: Pre-submission Checklist / 事前確認
+      options:
+        - label: I have verified that no patient identifiers (PHI), real DICOM files, or private machine paths are included in this report. / 本報告に患者情報（氏名・ID・生年月日等）、実際の DICOM ファイル、個人名入りパスが含まれていないことを確認しました。
+          required: true
+        - label: I have searched existing Issues and Discussions to confirm this is not a known problem. / 既知の Issue や Discussions を検索し、重複していないことを確認しました。
+          required: false
+  - type: textarea
+    attributes:
+      label: Environment Diagnostics / 環境診断情報 (`--diagnostics`)
+      description: |
+        Please paste the output of `dicom-organizer --diagnostics` (or click "Help -> Copy Diagnostics to Clipboard" in GUI). Home directory paths are automatically masked as `~`.
+        `dicom-organizer --diagnostics`（または GUI の「ヘルプ → 診断情報をクリップボードにコピー」）の出力をそのまま貼り付けてください。ホームディレクトリは自動で `~` にマスクされます。
+      placeholder: |
+        dicom-organizer: 0.2.0
+        pydicom: 3.0.2
+        PySide6: 6.11.1
+        ...
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Steps to Reproduce / 再現手順
+      description: What commands or GUI actions did you perform? / どのようなコマンドまたは GUI 操作を行いましたか？
+      placeholder: |
+        1. Run `dicom-organizer /path/to/sample -p auto`
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Expected Behavior / 期待される動作
+      description: What did you expect to happen? / 本来どうなることを期待していましたか？
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Actual Behavior and Error Output / 実際の挙動・エラー出力
+      description: What actually happened? Paste terminal output or error message if available. / 実際にはどうなりましたか？エラーメッセージ等があれば貼ってください。
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Summary Counts / organize_summary.json の件数
+      description: |
+        If `organize_summary.json` was generated, paste the counts section (verify that no patient information is present).
+        `organize_summary.json` が生成された場合、件数の部分を貼り付けてください（患者情報が含まれていないことを確認してください）。
+      placeholder: |
+        "organized_files": 12,
+        "csv_target_files": 10,
+        "skipped_by_reason": { ... }
+    validations:
+      required: false

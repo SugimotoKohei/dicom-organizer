@@ -1,357 +1,399 @@
 # dicom-organizer
 
 [![CI](https://github.com/SugimotoKohei/dicom-organizer/actions/workflows/ci.yml/badge.svg)](https://github.com/SugimotoKohei/dicom-organizer/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/dicom-organizer.svg)](https://pypi.org/project/dicom-organizer/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/SugimotoKohei/dicom-organizer/blob/main/LICENSE)
 
-A command-line tool that organizes DICOM files by acquisition date and series,
-and writes CSV summaries of DICOM acquisition parameters.
+[English](#english) | [日本語](#japanese)
 
-DICOMファイルを日付・シリーズごとに整理し、撮像条件のCSVを作るコマンドです。
+---
 
+<a id="english"></a>
 ## English
 
-### Installation
+A safe, offline desktop tool and command-line utility that organizes local messy DICOM directories into standardized series folders, audits acquisition parameters into unified CSV summaries, and prepares clean data for downstream research workflows.
 
-Install the command-line tool:
+### 1. Built for These Core Tasks
 
+- **List Imaging Parameters**: Extract standardized acquisition parameters (TR, TE, flip angle, bandwidth, slice thickness, phase encoding direction, and parallel acceleration factor) into CSV tables across scanners without copying files.
+- **Copy and Organize**: Safely sort messy slice exports into structured `<Device>/<StudyDate>/<SeriesNumber>_<SeriesFolderLabel>/` directories (using `ProtocolName` by default, or `SeriesDescription` for Philips, GE, and Canon/Toshiba systems) while tracking identical duplicate slices.
+- **Preview Before Organizing**: Safely simulate organization and review planned directory layouts and metadata summaries before writing anything to disk.
+
+### 2. Before and After Organization
+
+See [`docs/images/before-after.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/images/before-after.md) for full details.
+
+#### Input Structure (Disorganized Exports)
+```text
+sample_dataset/
+├── BACKUP/
+│   └── IM00001
+└── EXPORT/
+    ├── DISK1/
+    │   ├── 0001/
+    │   │   ├── IM00001
+    │   │   ├── IM00002
+    │   │   ├── IM00003
+    │   │   └── ...
+    │   ├── 0002/
+    │   │   ├── IM00010
+    │   │   ├── IM00011
+    │   │   ├── IM00012
+    │   │   └── ...
+    │   ├── 0003/
+    │   │   ├── IM00019
+    │   │   ├── IM00020
+    │   │   ├── IM00021
+    │   │   └── ...
+    │   └── 0004/
+    │       ├── IM00028
+    │       ├── IM00029
+    │       └── IM00030
+    └── README.TXT
+```
+
+#### Organized Output Structure
+```text
+organized/
+├── Example-Medical_Demo-CT/
+│   └── 20260604/
+│       ├── 000001_Axial-CT/
+│       │   ├── 000001.dcm
+│       │   ├── 000002.dcm
+│       │   └── 000003.dcm
+│       ├── dicom_parameters.csv
+│       └── series_summary.csv
+├── Example-Medical_Demo-MR-1.5T/
+│   └── 20260603/
+│       ├── 000001_T1/
+│       │   ├── 000001.dcm
+│       │   ├── 000002.dcm
+│       │   └── 000003.dcm
+│       ├── 000002_T2/
+│       │   ├── 000001.dcm
+│       │   ├── 000002.dcm
+│       │   └── 000003.dcm
+│       ├── 000003_FLAIR/
+│       │   ├── 000001.dcm
+│       │   ├── 000002.dcm
+│       │   └── 000003.dcm
+│       ├── dicom_parameters.csv
+│       └── series_summary.csv
+├── Example-Medical_Demo-MR-3T/
+│   ├── 20260601/
+│   │   ├── 000001_T1/
+│   │   │   ├── 000001.dcm
+│   │   │   ├── 000002.dcm
+│   │   │   └── 000003.dcm
+│   │   ├── 000002_T2/
+│   │   │   ├── 000001.dcm
+│   │   │   ├── 000002.dcm
+│   │   │   └── 000003.dcm
+│   │   ├── 000003_FLAIR/
+│   │   │   ├── 000001.dcm
+│   │   │   ├── 000002.dcm
+│   │   │   └── 000003.dcm
+│   │   ├── 000099_PR/
+│   │   │   └── 000001.dcm
+│   │   ├── dicom_parameters.csv
+│   │   └── series_summary.csv
+│   └── 20260602/
+│       ├── 000001_T1/
+│       │   ├── 000001.dcm
+│       │   ├── 000002.dcm
+│       │   └── 000003.dcm
+│       ├── 000002_T2/
+│       │   ├── 000001.dcm
+│       │   ├── 000002.dcm
+│       │   └── 000003.dcm
+│       ├── 000003_FLAIR/
+│       │   ├── 000001.dcm
+│       │   ├── 000002.dcm
+│       │   └── 000003.dcm
+│       ├── dicom_parameters.csv
+│       └── series_summary.csv
+├── all_series_summary.csv
+├── file_report.csv
+└── organize_summary.json
+```
+
+#### Extracted Parameter Summary (`all_series_summary.csv`)
+| StudyFolder | SeriesFolder | SeriesDescription | Modality | TR_ms | TE_ms | FlipAngle_deg | ScanDuration |
+|---|---|---|---|---|---|---|---|
+| Example-Medical_Demo-CT/20260604 | Example-Medical_Demo-CT/20260604/000001_Axial-CT | Demo CT Axial CT | CT | N/A | N/A | N/A | N/A |
+| Example-Medical_Demo-MR-1.5T/20260603 | Example-Medical_Demo-MR-1.5T/20260603/000001_T1 | Demo MR 1.5T T1 | MR | 450.0 | 12.0 | 70.0 | 00:01:40 |
+| Example-Medical_Demo-MR-1.5T/20260603 | Example-Medical_Demo-MR-1.5T/20260603/000002_T2 | Demo MR 1.5T T2 | MR | 3500.0 | 90.0 | 90.0 | 00:02:40 |
+| Example-Medical_Demo-MR-1.5T/20260603 | Example-Medical_Demo-MR-1.5T/20260603/000003_FLAIR | Demo MR 1.5T FLAIR | MR | 8000.0 | 110.0 | 140.0 | 00:03:30 |
+| Example-Medical_Demo-MR-3T/20260601 | Example-Medical_Demo-MR-3T/20260601/000001_T1 | Demo MR 3T T1 | MR | 500.0 | 10.0 | 70.0 | 00:02:00 |
+| Example-Medical_Demo-MR-3T/20260601 | Example-Medical_Demo-MR-3T/20260601/000002_T2 | Demo MR 3T T2 | MR | 4000.0 | 80.0 | 90.0 | 00:03:00 |
+| Example-Medical_Demo-MR-3T/20260601 | Example-Medical_Demo-MR-3T/20260601/000003_FLAIR | Demo MR 3T FLAIR | MR | 9000.0 | 120.0 | 150.0 | 00:04:00 |
+| Example-Medical_Demo-MR-3T/20260602 | Example-Medical_Demo-MR-3T/20260602/000001_T1 | Demo MR 3T T1 | MR | 500.0 | 10.0 | 70.0 | 00:02:00 |
+| Example-Medical_Demo-MR-3T/20260602 | Example-Medical_Demo-MR-3T/20260602/000002_T2 | Demo MR 3T T2 | MR | 4000.0 | 100.0 | 90.0 | 00:03:00 |
+| Example-Medical_Demo-MR-3T/20260602 | Example-Medical_Demo-MR-3T/20260602/000003_FLAIR | Demo MR 3T FLAIR | MR | 9000.0 | 120.0 | 150.0 | 00:04:00 |
+
+#### Interactive GUI Demonstration
+![dicom-organizer demo](https://raw.githubusercontent.com/SugimotoKohei/dicom-organizer/main/docs/images/demo-ja.gif)
+
+![dicom-organizer English GUI](https://raw.githubusercontent.com/SugimotoKohei/dicom-organizer/main/docs/images/result-list-en.png)
+
+More screenshots are available in [`docs/images/`](https://github.com/SugimotoKohei/dicom-organizer/tree/main/docs/images).
+
+### 3. Getting Started
+
+#### Standalone Desktop App (Recommended for most users)
+Download the application bundle for Windows or macOS from [GitHub Releases](https://github.com/SugimotoKohei/dicom-organizer/releases).
+> [!NOTE]
+> Standalone executable packages will be provided starting with the **0.2.0** release. Prior to 0.2.0, please use the Python package. The published PyPI package may differ slightly from the unreleased main branch documentation.
+> Unsigned binaries trigger first-launch warnings; see [`docs/install.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/install.md) for dismissal instructions.
+
+#### Python Package Edition
+Requires Python 3.11 or later (automated test suite verifies 3.11, 3.12, 3.13, and 3.14; using the GUI extra follows PySide6 version support, which is Python >=3.10,<3.15 as of PySide6 6.11.1 in 2026-09):
 ```bash
+# Command-line tool only
 uv tool install dicom-organizer
-```
 
-From this repository:
-
-```bash
-git clone https://github.com/SugimotoKohei/dicom-organizer.git
-cd dicom-organizer
-uv tool install --editable . --force
-```
-
-### Usage
-
-Run the organizer:
-
-```bash
-dicom-organizer /path/to/dicom-root
-```
-
-Check the installed version:
-
-```bash
-dicom-organizer --version
-```
-
-A dry run is optional, but useful when checking a new input folder or output
-template before writing files:
-
-```bash
-dicom-organizer /path/to/dicom-root -n
-```
-
-`-i /path/to/dicom-root` and `--input /path/to/dicom-root` are still accepted
-for compatibility, but the positional input path is preferred. By default, files are copied to
-`<input>/organized/`. Source files are not removed.
-By default, DICOM headers are read with `force=True` so exports with slightly
-non-standard headers are still included. Add `--no-force-read` if you want to
-require standard DICOM headers. Existing output files still raise an error by
-default; add `--if-exists skip` when re-running into an existing output folder
-and you want to leave existing files untouched.
-The default metadata profile is `auto`, which writes a single
-`dicom_parameters.csv` for supported image modalities (`MR`, `CT`, `US`, `XA`,
-`PT`) and expands columns based on the modalities actually present. Use
-`--profile generic` for common columns only, or `--profile mr|ct|us|xa|pt` to
-focus the CSVs on one modality.
-
-```bash
-dicom-organizer /path/to/dicom-root -p generic
-dicom-organizer /path/to/dicom-root -p ct
-```
-
-The default series folder name uses a normalized series label: usually `ProtocolName`,
-but on vendors where `SeriesDescription` better matches the console-visible sequence
-name (for example Philips, GE, and Canon/Toshiba-family systems), it prefers
-`SeriesDescription`. If a Philips series contains multiple reconstruction types in the
-same `SeriesInstanceUID`, the default folder name also appends a reconstruction label
-derived from `ImageType`. When a Philips series label is only a number, the default
-name also prefixes the descriptive anchor label from the same acquisition when one is
-available.
-
-Output:
-
-```text
-organized/<AcquisitionDate>/<SeriesNumber>_<SeriesFolderLabel>/000001.dcm
-organized/<AcquisitionDate>/dicom_parameters.csv
-organized/<AcquisitionDate>/series_summary.csv
-organized/organize_summary.json
-```
-
-`dicom_parameters.csv` and `series_summary.csv` focus on supported image objects.
-Presentation states and vendor-private helper objects may still be organized into
-folders, but they are excluded from these parameter tables.
-
-Run summaries report both the total organized DICOM files and the files included
-in the CSV parameter tables:
-
-```text
-profile=auto
-organized_files=12
-csv_target_files=10
-csv_excluded_non_image_files=2
-organized_files_by_modality=CT=3,MR=7,PR=2
-csv_target_files_by_modality=CT=3,MR=7
-csv_excluded_files_by_modality=PR=2
-```
-
-During `--dry-run`, no files are written. The summary also lists the metadata
-files that would be created.
-
-### CSV Columns
-
-`--profile auto` writes the union of columns for supported modalities present in
-the input. `--profile generic` writes common columns only. Repeatable
-`--dicom-tag` columns are appended to both CSV files after the profile columns.
-`series_summary.csv` is generated only from the prepared `dicom_parameters.csv`
-rows; it does not read or derive a separate set of DICOM values. Every summary
-column is therefore also present in `dicom_parameters.csv`. Series aggregates
-such as `FileCount`, `EchoCount`, and `EchoTimes_ms` are repeated on the
-corresponding parameter rows. Per-image identifiers, filenames, instance
-numbers, and image positions remain parameter-only because they cannot be
-represented by one unambiguous series value. See
-[CSV Schema](docs/csv-schema.md) for the full CSV row scope, modality-specific
-columns, `N/A` handling, and summary counts.
-
-MR outputs include `InPlanePhaseEncodingDirection` and the derived
-`PhaseEncodingDirectionPatient` in both `dicom_parameters.csv` and
-`series_summary.csv`. The derived value maps the DICOM `ROW`/`COL` image axis
-through `ImageOrientationPatient` and writes the positive image-index direction
-as a patient-relative arrow such as `R→L`, `A→P`, or `H→F`. `PatientPosition`
-is also retained in both CSV files for reference, but is not used as a geometric
-transform because DICOM defines it as an annotation. Missing or
-unsupported source geometry produces `N/A`.
-
-The MR column `ParallelReductionFactorInPlane` reports the standard DICOM
-in-plane parallel-imaging acceleration factor in both CSV files. For example,
-`2.0` means a twofold measurement-time reduction factor. Classic top-level and
-Enhanced MR functional-group values are supported. For Siemens DICOM without
-the standard attribute, the explicit CSA protocol value `sPat.lAccelFactPE` is
-used as a fallback. If neither value exists, the result is `N/A`.
-
-### Common Options
-
-Avoid writing patient identifiers to CSV:
-
-```bash
-dicom-organizer /path/to/dicom-root --patient-mode hash
-dicom-organizer /path/to/dicom-root --patient-mode drop
-```
-
-Add extra DICOM tags to the CSV:
-
-```bash
-dicom-organizer /path/to/dicom-root -t EchoTime -t TransmitCoilName
-```
-
-Common short options are also available: `-i/--input`, `-o/--output`,
-`-p/--profile`, `-n/--dry-run`, `-f/--force-read`, `-l/--limit`,
-`-t/--dicom-tag`, and `-v/--verbose`.
-
-Use the optional GUI:
-
-```bash
+# Command-line tool + PySide6 desktop GUI
 uv tool install 'dicom-organizer[gui]'
-dicom-organizer-gui
 ```
 
-On macOS, create a lightweight `.app` launcher for the installed GUI:
+#### Try with Synthetic Samples
+- In the GUI: Click **"Try with Sample Data"** on the start screen.
+- In terminal: Run the built-in self-test:
+  ```bash
+  dicom-organizer --self-test
+  ```
 
-```bash
-dicom-organizer-gui-app
-open ~/Applications/dicom-organizer.app
-```
+For comprehensive CLI arguments and column derivations, see [`docs/usage.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/usage.md).
 
-The launcher uses the Python environment where `dicom-organizer[gui]` is
-installed, so keep that tool installation in place. Re-run
-`dicom-organizer-gui-app --force` after upgrading if you want to refresh the
-launcher metadata.
+### 4. Generated Output Files
 
-Try it without real DICOM data:
+When organizing completes, the following files are produced:
+- `all_series_summary.csv`: Root-level table concatenating imaging parameter summaries across all processed series and studies.
+- `<StudyFolder>/series_summary.csv` & `dicom_parameters.csv`: Detailed parameter tables generated per examination folder.
+- `file_report.csv`: Complete audit log tracking every candidate file, destination path, status, and skip reasons.
+- `organize_summary.json`: Machine-readable execution summary recording configuration, timestamps (`started_at`, `ended_at`), and categorized skip counts.
 
-```bash
-uv run python examples/synthetic_quickstart.py
-```
+In list-only mode (`--list-only`), `all_series_summary.csv`, `all_dicom_parameters.csv`, `file_report.csv`, and `organize_summary.json` are generated directly under the output root without per-study directories.
 
-Note: the default `--patient-mode keep` writes `PatientName` and `PatientID` to CSV files. Use `hash` or `drop`, and inspect generated CSV files before sharing outputs.
+### 5. Essential Notices & Limitations
 
+- **Patient Information Safety**:
+  - `dicom-organizer` is **not an anonymization tool**. DICOM file binaries are never altered; patient identifiers remain embedded inside all organized DICOM slices.
+  - `--patient-mode keep` (default) writes patient names and IDs to CSV tables. Use `--patient-mode hash` (pseudonymization) or `--patient-mode drop` (omission) to sanitize CSV outputs. See [`docs/privacy.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/privacy.md).
+- **Not a Medical Device**: Provided solely for research and local data organization workflows. It is not intended for diagnostic or clinical decision making.
+- **Modality Support Boundaries**: Real scanner validation was performed on MR (5 scanner models across 4 manufacturers). CT, US, XA, and PT modalities, along with compressed transfer syntaxes and Japanese character sets, are verified using synthetic test datasets. See [`docs/support-matrix.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/support-matrix.md) and [`docs/validation.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/validation.md).
+
+### 6. Documentation Index by Role
+
+- **New Users & Technologists**: [`docs/install.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/install.md), [`docs/faq.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/faq.md), [`docs/usage.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/usage.md).
+- **Researchers & Engineers**: [`docs/positioning.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/positioning.md), [`docs/support-matrix.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/support-matrix.md), [`docs/privacy.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/privacy.md), [`docs/performance.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/performance.md).
+- **IT Administrators**: [`docs/deployment-guide.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/deployment-guide.md), [`docs/validation.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/validation.md).
+- **Full Library**: [`docs/README.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/README.md).
+
+### 7. Support & Contact
+
+If you have questions or encounter issues, refer to [`SUPPORT.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/SUPPORT.md).
+- For general questions: [GitHub Discussions](https://github.com/SugimotoKohei/dicom-organizer/discussions).
+- For bugs: [Bug Report Template](https://github.com/SugimotoKohei/dicom-organizer/issues/new?template=bug_report.yml).
+- Email contact: `sugimotokouhei@gmail.com`
+> [!CAUTION]
+> **Never send real patient data, clinical DICOM files, or private paths via GitHub or email.**
+
+### 8. Governance & Contributing
+
+See [`GOVERNANCE.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/GOVERNANCE.md) and [`CONTRIBUTING.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/CONTRIBUTING.md). Released under the [MIT License](https://github.com/SugimotoKohei/dicom-organizer/blob/main/LICENSE).
+
+---
+
+<a id="japanese"></a>
 ## 日本語
 
-### インストール
+手元の PC で安全に動作し、散らばった DICOM フォルダを規格化されたシリーズ階層に自動整理するとともに、撮像条件（TR、TE、フリップ角、スライス厚、倍速数など）を 1 つの CSV 表に抽出するオープンソースツールです。
 
-コマンドラインツールをインストールします。
+### 1. こんな作業に
 
+- **撮像条件を一覧にする**: 画像をコピーせず、複数メーカーの MR/CT 撮像パラメータ（TR, TE, フリップ角, スライス厚, 位相エンコード方向, 倍速数等）を 1 つの CSV に抽出します。
+- **コピーして整理する**: コンソールやディスクから取り出した散乱スライスを、`<装置名>/<検査日>/<シリーズ番号>_<系列名>/`（系列名は通常 `ProtocolName`、Philips・GE・Canon/Toshiba では `SeriesDescription`）の階層へコピーし、同一重複を除外します。
+- **整理前に内容を確認する**: 実際にディスクへ書き込む前に、整理対象ファイル数、スキップ理由、作成予定のフォルダ階層を画面上で安全に事前シミュレーションします。
+
+### 2. 整理前と整理後
+
+詳細は [`docs/images/before-after.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/images/before-after.md) をご覧ください。
+
+#### 整理前の入力ツリー（散乱したエクスポート）
+```text
+sample_dataset/
+├── BACKUP/
+│   └── IM00001
+└── EXPORT/
+    ├── DISK1/
+    │   ├── 0001/
+    │   │   ├── IM00001
+    │   │   ├── IM00002
+    │   │   ├── IM00003
+    │   │   └── ...
+    │   ├── 0002/
+    │   │   ├── IM00010
+    │   │   ├── IM00011
+    │   │   ├── IM00012
+    │   │   └── ...
+    │   ├── 0003/
+    │   │   ├── IM00019
+    │   │   ├── IM00020
+    │   │   ├── IM00021
+    │   │   └── ...
+    │   └── 0004/
+    │       ├── IM00028
+    │       ├── IM00029
+    │       └── IM00030
+    └── README.TXT
+```
+
+#### 整理後の出力ツリー
+```text
+organized/
+├── Example-Medical_Demo-CT/
+│   └── 20260604/
+│       ├── 000001_Axial-CT/
+│       │   ├── 000001.dcm
+│       │   ├── 000002.dcm
+│       │   └── 000003.dcm
+│       ├── dicom_parameters.csv
+│       └── series_summary.csv
+├── Example-Medical_Demo-MR-1.5T/
+│   └── 20260603/
+│       ├── 000001_T1/
+│       │   ├── 000001.dcm
+│       │   ├── 000002.dcm
+│       │   └── 000003.dcm
+│       ├── 000002_T2/
+│       │   ├── 000001.dcm
+│       │   ├── 000002.dcm
+│       │   └── 000003.dcm
+│       ├── 000003_FLAIR/
+│       │   ├── 000001.dcm
+│       │   ├── 000002.dcm
+│       │   └── 000003.dcm
+│       ├── dicom_parameters.csv
+│       └── series_summary.csv
+├── Example-Medical_Demo-MR-3T/
+│   ├── 20260601/
+│   │   ├── 000001_T1/
+│   │   │   ├── 000001.dcm
+│   │   │   ├── 000002.dcm
+│   │   │   └── 000003.dcm
+│   │   ├── 000002_T2/
+│   │   │   ├── 000001.dcm
+│   │   │   ├── 000002.dcm
+│   │   │   └── 000003.dcm
+│   │   ├── 000003_FLAIR/
+│   │   │   ├── 000001.dcm
+│   │   │   ├── 000002.dcm
+│   │   │   └── 000003.dcm
+│   │   ├── 000099_PR/
+│   │   │   └── 000001.dcm
+│   │   ├── dicom_parameters.csv
+│   │   └── series_summary.csv
+│   └── 20260602/
+│       ├── 000001_T1/
+│       │   ├── 000001.dcm
+│       │   ├── 000002.dcm
+│       │   └── 000003.dcm
+│       ├── 000002_T2/
+│       │   ├── 000001.dcm
+│       │   ├── 000002.dcm
+│       │   └── 000003.dcm
+│       ├── 000003_FLAIR/
+│       │   ├── 000001.dcm
+│       │   ├── 000002.dcm
+│       │   └── 000003.dcm
+│       ├── dicom_parameters.csv
+│       └── series_summary.csv
+├── all_series_summary.csv
+├── file_report.csv
+└── organize_summary.json
+```
+
+#### 抽出された撮像条件の抜粋 (`all_series_summary.csv`)
+| StudyFolder | SeriesFolder | SeriesDescription | Modality | TR_ms | TE_ms | FlipAngle_deg | ScanDuration |
+|---|---|---|---|---|---|---|---|
+| Example-Medical_Demo-CT/20260604 | Example-Medical_Demo-CT/20260604/000001_Axial-CT | Demo CT Axial CT | CT | N/A | N/A | N/A | N/A |
+| Example-Medical_Demo-MR-1.5T/20260603 | Example-Medical_Demo-MR-1.5T/20260603/000001_T1 | Demo MR 1.5T T1 | MR | 450.0 | 12.0 | 70.0 | 00:01:40 |
+| Example-Medical_Demo-MR-1.5T/20260603 | Example-Medical_Demo-MR-1.5T/20260603/000002_T2 | Demo MR 1.5T T2 | MR | 3500.0 | 90.0 | 90.0 | 00:02:40 |
+| Example-Medical_Demo-MR-1.5T/20260603 | Example-Medical_Demo-MR-1.5T/20260603/000003_FLAIR | Demo MR 1.5T FLAIR | MR | 8000.0 | 110.0 | 140.0 | 00:03:30 |
+| Example-Medical_Demo-MR-3T/20260601 | Example-Medical_Demo-MR-3T/20260601/000001_T1 | Demo MR 3T T1 | MR | 500.0 | 10.0 | 70.0 | 00:02:00 |
+| Example-Medical_Demo-MR-3T/20260601 | Example-Medical_Demo-MR-3T/20260601/000002_T2 | Demo MR 3T T2 | MR | 4000.0 | 80.0 | 90.0 | 00:03:00 |
+| Example-Medical_Demo-MR-3T/20260601 | Example-Medical_Demo-MR-3T/20260601/000003_FLAIR | Demo MR 3T FLAIR | MR | 9000.0 | 120.0 | 150.0 | 00:04:00 |
+| Example-Medical_Demo-MR-3T/20260602 | Example-Medical_Demo-MR-3T/20260602/000001_T1 | Demo MR 3T T1 | MR | 500.0 | 10.0 | 70.0 | 00:02:00 |
+| Example-Medical_Demo-MR-3T/20260602 | Example-Medical_Demo-MR-3T/20260602/000002_T2 | Demo MR 3T T2 | MR | 4000.0 | 100.0 | 90.0 | 00:03:00 |
+| Example-Medical_Demo-MR-3T/20260602 | Example-Medical_Demo-MR-3T/20260602/000003_FLAIR | Demo MR 3T FLAIR | MR | 9000.0 | 120.0 | 150.0 | 00:04:00 |
+
+#### デスクトップ GUI の操作例
+![dicom-organizer 操作デモ](https://raw.githubusercontent.com/SugimotoKohei/dicom-organizer/main/docs/images/demo-ja.gif)
+
+その他の画面例は [`docs/images/`](https://github.com/SugimotoKohei/dicom-organizer/tree/main/docs/images) を参照してください。
+
+### 3. はじめ方
+
+#### 単体デスクトップアプリ版（Python 不要・おすすめ）
+[GitHub Releases](https://github.com/SugimotoKohei/dicom-organizer/releases) から Windows 版または macOS 版の zip をダウンロードして展開します。
+> [!NOTE]
+> 単体アプリ版は本改定を含むリリース **0.2.0** から提供されます。それまでは Python パッケージ版をご利用ください。PyPI で公開中のバージョンと、本 README（main ブランチ）の内容が異なる場合があります。
+> 未署名アプリのため初回起動時にセキュリティ警告が表示されます。解除方法は [`docs/install.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/install.md) を参照してください。
+
+#### Python パッケージ版
+Python 3.11 以上（自動テストで確認しているのは 3.11・3.12・3.13・3.14。GUI を使う場合は PySide6 の対応範囲に従い、2026-09 時点の PySide6 6.11.1 は 3.10 以上 3.15 未満）の環境で `uv` を用いてインストールします:
 ```bash
+# コマンドラインツールのみ
 uv tool install dicom-organizer
-```
 
-このリポジトリから使う場合:
-
-```bash
-git clone https://github.com/SugimotoKohei/dicom-organizer.git
-cd dicom-organizer
-uv tool install --editable . --force
-```
-
-### 使い方
-
-整理を実行します。
-
-```bash
-dicom-organizer /path/to/dicom-root
-```
-
-インストール済みバージョンを確認します。
-
-```bash
-dicom-organizer --version
-```
-
-dry-runは必須ではありませんが、新しい入力フォルダや出力テンプレートを使う前に、
-書き込みなしで確認したい場合に便利です。
-
-```bash
-dicom-organizer /path/to/dicom-root -n
-```
-
-互換性のため `-i /path/to/dicom-root` と `--input /path/to/dicom-root` も
-引き続き使えますが、通常は位置引数の入力パスを推奨します。
-既定では `<input>/organized/` にコピーされます。元ファイルは消えません。
-既定では `force=True` でDICOMヘッダーを読み、少し非標準なexport由来のDICOMも
-対象にします。標準的なDICOMヘッダーだけを許可したい場合は `--no-force-read` を
-付けます。出力先に既存ファイルがある場合は、引き続き既定でエラーにします。
-既存の出力フォルダへ再実行し、既存ファイルをそのまま残したい場合は
-`--if-exists skip` を付けます。
-既定の metadata profile は `auto` で、対応している画像モダリティ（`MR`, `CT`,
-`US`, `XA`, `PT`）を 1 つの `dicom_parameters.csv` にまとめ、実際に含まれる
-モダリティに応じて列を広げます。共通列だけ欲しい場合は `--profile generic`、
-単一モダリティに絞りたい場合は `--profile mr|ct|us|xa|pt` を使います。
-
-```bash
-dicom-organizer /path/to/dicom-root -p generic
-dicom-organizer /path/to/dicom-root -p ct
-```
-
-シリーズフォルダ名の既定値は正規化した series label で、通常は `ProtocolName`、
-ただし Philips や GE、Canon/Toshiba 系のように `SeriesDescription` のほうが
-コンソール上の系列名に近い装置では `SeriesDescription` を優先します。さらに、
-Philips で同じ `SeriesInstanceUID` に複数の再構成が含まれる場合は、`ImageType`
-由来の再構成ラベルもフォルダ名に付きます。また、Philips でラベルが数字だけの
-系列は、同一 acquisition 内の説明的な系列名を前置して分かりやすくします。
-
-出力:
-
-```text
-organized/<AcquisitionDate>/<SeriesNumber>_<SeriesFolderLabel>/000001.dcm
-organized/<AcquisitionDate>/dicom_parameters.csv
-organized/<AcquisitionDate>/series_summary.csv
-organized/organize_summary.json
-```
-
-`dicom_parameters.csv` と `series_summary.csv` は対応している画像オブジェクトを
-対象にしています。プレゼンテーションステートやベンダー独自の補助オブジェクトも
-フォルダ整理はされますが、パラメータ表からは除外されます。
-
-実行サマリには、整理されたDICOMファイル総数と、CSVパラメータ表の対象になった
-ファイル数が分かれて表示されます。
-
-```text
-profile=auto
-organized_files=12
-csv_target_files=10
-csv_excluded_non_image_files=2
-organized_files_by_modality=CT=3,MR=7,PR=2
-csv_target_files_by_modality=CT=3,MR=7
-csv_excluded_files_by_modality=PR=2
-```
-
-`--dry-run` ではファイルは書き込まれません。サマリには、作成予定のメタデータ
-ファイルも表示されます。
-
-### CSV列
-
-`--profile auto` は入力内に存在する対応モダリティの列をまとめて出力します。
-`--profile generic` は共通列だけを出力します。繰り返し指定できる `--dicom-tag`
-列は両CSVのprofile列の後ろに追加されます。`series_summary.csv` は、準備済みの
-`dicom_parameters.csv` 用rowだけから生成し、DICOM値を別経路で読み直したり
-導出したりしません。そのため、summaryの全列は `dicom_parameters.csv` にも
-存在します。`FileCount`、`EchoCount`、`EchoTimes_ms` などのseries集計値は、
-対応するparameters各行にも繰り返し出力します。画像固有の識別子、ファイル名、
-instance number、画像位置は、seriesの単一値にできないためparametersだけに残します。
-CSVの行単位、モダリティ別列、`N/A` の扱い、summary件数の詳細は
-[CSV Schema](docs/csv-schema.md) を参照してください。
-
-MR出力では、`InPlanePhaseEncodingDirection` と、そこから導出した
-`PhaseEncodingDirectionPatient` を `dicom_parameters.csv` と
-`series_summary.csv` の両方に出力します。導出列はDICOMの `ROW` / `COL` 軸を
-`ImageOrientationPatient` で患者座標へ写像し、画像indexが増える向きを `R→L`、
-`A→P`、`H→F` などの矢印で表します。参照用の `PatientPosition` も両CSVに
-残しますが、DICOM上は注釈情報なので幾何変換には
-使いません。必要なgeometryが欠損または非対応の場合は `N/A` になります。
-
-MR列の `ParallelReductionFactorInPlane` には、標準DICOMの面内パラレル
-イメージング倍速数を両CSVへ出力します。たとえば `2.0` は測定時間の短縮係数が
-2倍であることを表します。classic DICOMのtop-level属性とEnhanced MRの
-functional groupに対応します。標準属性がないSiemens DICOMでは、CSA protocolの
-明示値 `sPat.lAccelFactPE` をfallbackとして使います。どちらもない場合は `N/A` です。
-
-### よく使うオプション
-
-患者情報をCSVに残したくない場合:
-
-```bash
-dicom-organizer /path/to/dicom-root --patient-mode hash
-dicom-organizer /path/to/dicom-root --patient-mode drop
-```
-
-任意のDICOMタグをCSVに追加する場合:
-
-```bash
-dicom-organizer /path/to/dicom-root -t EchoTime -t TransmitCoilName
-```
-
-よく使う短縮形として、`-i/--input`, `-o/--output`, `-p/--profile`,
-`-n/--dry-run`, `-f/--force-read`, `-l/--limit`, `-t/--dicom-tag`,
-`-v/--verbose` が使えます。
-
-GUIを使う場合:
-
-```bash
+# コマンドラインツール + PySide6 デスクトップ GUI
 uv tool install 'dicom-organizer[gui]'
-dicom-organizer-gui
 ```
 
-macOSでは、インストール済みGUI用の軽量 `.app` launcherを作成できます。
+#### 合成サンプルで試す（実データ不要）
+- GUI の場合: 初期画面の「**サンプルデータで試す**」ボタンをクリック。
+- コマンドラインの場合: 自己診断コマンドを実行:
+  ```bash
+  dicom-organizer --self-test
+  ```
 
-```bash
-dicom-organizer-gui-app
-open ~/Applications/dicom-organizer.app
-```
+CLI オプションの詳細や各パラメータの解説は [`docs/usage.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/usage.md) をご覧ください。
 
-このlauncherは `dicom-organizer[gui]` をインストールしたPython環境を使います。
-そのため、作成後もuv toolのインストール環境は残してください。アップグレード後に
-launcherのメタデータを更新したい場合は `dicom-organizer-gui-app --force` を再実行します。
+### 4. 出力されるもの
 
-実DICOMなしで試す場合:
+整理完了後、以下のファイルが作成されます:
+- `all_series_summary.csv`: 出力ルート直下に作成される、全検査・全シリーズを横断した撮像パラメータ一覧表。
+- `<検査フォルダ>/series_summary.csv` & `dicom_parameters.csv`: 検査フォルダごとに作成される詳細パラメータ表。
+- `file_report.csv`: 検出された全ファイルの元パス、整理先パス、処理成否、スキップ理由を記録した監査レポート。
+- `organize_summary.json`: 実行オプション、開始・終了時刻（`started_at`、`ended_at`）、スキップ理由別の件数を記録した機械可読サマリ。
 
-```bash
-uv run python examples/synthetic_quickstart.py
-```
+なお、一覧のみモード（`--list-only`）では、出力ルート直下に `all_series_summary.csv`、`all_dicom_parameters.csv`、`file_report.csv`、`organize_summary.json` が生成されます。
 
-注意: 既定の `--patient-mode keep` では `PatientName` と `PatientID` がCSVに残ります。共有前は `hash` または `drop` を使い、出力CSVを確認してください。
+### 5. 大事な注意点
 
-## Development
+- **患者情報の保護**:
+  - `dicom-organizer` は **匿名化ツールではありません**。整理された DICOM ファイルのバイナリやヘッダーは変更されず、患者情報は内部に残ります。
+  - `--patient-mode keep`（既定値）では患者氏名や ID が CSV に出力されます。外部共有時は `--patient-mode hash`（仮名化）または `--patient-mode drop`（除外）を指定し、事前に CSV を確認してください。詳細は [`docs/privacy.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/privacy.md) を参照してください。
+- **医療機器ではありません**: 本ソフトウェアは研究およびデータ整理ワークフローを支援するものであり、診断や治療等の医療行為には使用できません。
+- **対応範囲**: 実データで検証したのは MR（4 社 5 機種）です。CT、US、XA、PT、圧縮転送構文、および日本語文字コードは合成データのテストで確認しています。詳細は [`docs/support-matrix.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/support-matrix.md) および [`docs/validation.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/validation.md) をご覧ください。
 
-```bash
-uv sync --locked
-uv run python -m pytest
-uv run ruff check
-uv build
-```
+### 6. ドキュメントの案内（利用者別）
 
-MIT License. See [LICENSE](LICENSE).
+- **はじめて使う方・診療放射線技師**: [`docs/install.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/install.md), [`docs/faq.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/faq.md), [`docs/usage.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/usage.md).
+- **医用画像研究者・解析者**: [`docs/positioning.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/positioning.md), [`docs/support-matrix.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/support-matrix.md), [`docs/privacy.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/privacy.md), [`docs/performance.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/performance.md).
+- **施設の IT 管理者**: [`docs/deployment-guide.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/deployment-guide.md), [`docs/validation.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/validation.md).
+- **ドキュメント目次**: [`docs/README.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/README.md).
+
+### 7. 困ったとき・お問い合わせ
+
+困ったときは [`SUPPORT.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/SUPPORT.md) の手順をご確認ください。
+- 使い方の質問や相談: [GitHub Discussions](https://github.com/SugimotoKohei/dicom-organizer/discussions)
+- 不具合の報告: [Bug Report](https://github.com/SugimotoKohei/dicom-organizer/issues/new?template=bug_report.yml)
+- メールでのお問い合わせ: `sugimotokouhei@gmail.com`
+> [!CAUTION]
+> **Issue やメールには、患者情報（PHI）や実際の DICOM ファイルを絶対に含めないでください。**
+
+### 8. 運営方針と貢献
+
+プロジェクトの運営体制は [`GOVERNANCE.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/GOVERNANCE.md)、開発や貢献の手順は [`CONTRIBUTING.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/CONTRIBUTING.md) をご覧ください。本ソフトウェアは [MIT License](https://github.com/SugimotoKohei/dicom-organizer/blob/main/LICENSE) のもとで公開されています。

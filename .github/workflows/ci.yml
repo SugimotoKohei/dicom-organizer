@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   test:
-    name: ${{ matrix.os }} / Python 3.11
+    name: ${{ matrix.os }} / CLI + GUI tests
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -22,6 +22,12 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
+      - name: Install Qt runtime libraries (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libglib2.0-0 libdbus-1-3 fonts-noto-cjk
+
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
@@ -30,19 +36,25 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.14"
 
       - name: Check lockfile
         run: uv lock --check
 
       - name: Install dependencies
-        run: uv sync --locked
+        run: uv sync --locked --extra gui
 
       - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+          DICOM_ORGANIZER_REQUIRE_GUI: "1"
         run: uv run python -m pytest
 
       - name: Run ruff
         run: uv run ruff check
+
+      - name: Run CLI self-test
+        run: uv run dicom-organizer --self-test
 
       - name: Build package
         run: uv build
@@ -55,3 +67,111 @@ jobs:
 
       - name: Synthetic workflow smoke test
         run: uv run python examples/synthetic_quickstart.py
+
+  package-install:
+    name: ${{ matrix.os }} / Package install test
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Qt runtime libraries (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libglib2.0-0 libdbus-1-3 fonts-noto-cjk
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Build wheel
+        run: uv build --wheel
+
+      - name: Test installation in clean venv (CLI only)
+        run: |
+          uv venv --python 3.14 test-venv-cli
+          if [ -f "test-venv-cli/bin/python" ]; then
+            PYTHON_BIN="test-venv-cli/bin/python"
+            export PATH="$PWD/test-venv-cli/bin:$PATH"
+          else
+            PYTHON_BIN="test-venv-cli/Scripts/python.exe"
+            export PATH="$PWD/test-venv-cli/Scripts:$PATH"
+          fi
+          WHEEL_PATH=$(ls dist/*.whl | head -n 1)
+          uv pip install --python "$PYTHON_BIN" "$WHEEL_PATH"
+          dicom-organizer --version
+          dicom-organizer --self-test
+
+      - name: Test installation in clean venv with GUI extras
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          uv venv --python 3.14 test-venv-gui
+          if [ -f "test-venv-gui/bin/python" ]; then
+            PYTHON_BIN="test-venv-gui/bin/python"
+            export PATH="$PWD/test-venv-gui/bin:$PATH"
+          else
+            PYTHON_BIN="test-venv-gui/Scripts/python.exe"
+            export PATH="$PWD/test-venv-gui/Scripts:$PATH"
+          fi
+          WHEEL_PATH=$(ls dist/*.whl | head -n 1)
+          uv pip install --python "$PYTHON_BIN" "${WHEEL_PATH}[gui]"
+          dicom-organizer-gui --self-test
+          dicom-organizer-gui --gui-smoke-test
+
+  test-python-versions:
+    name: ubuntu-latest / Python ${{ matrix.python-version }} / CLI + GUI tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Qt runtime libraries (Ubuntu)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libglib2.0-0 libdbus-1-3 fonts-noto-cjk
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies and run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+          DICOM_ORGANIZER_REQUIRE_GUI: "1"
+        run: |
+          uv venv --python ${{ matrix.python-version }} .venv
+          uv pip install '.[gui]' pytest
+          .venv/bin/python -m pytest -q
+          .venv/bin/dicom-organizer --version
+          .venv/bin/dicom-organizer --self-test
+          .venv/bin/dicom-organizer-gui --self-test
+

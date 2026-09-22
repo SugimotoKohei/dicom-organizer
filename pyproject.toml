@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dicom-organizer"
-version = "0.1.4"
+version = "0.2.0"
 description = "Local DICOM organizer with CLI and optional PySide6 GUI"
 readme = { file = "README.md", content-type = "text/markdown" }
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [
@@ -19,13 +19,20 @@ maintainers = [
 keywords = [
     "dicom",
     "mri",
+    "ct",
     "medical-imaging",
+    "acquisition-parameters",
+    "protocol",
     "pydicom",
     "cli",
+    "gui",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
+    "Environment :: X11 Applications :: Qt",
+    "Environment :: MacOS X",
+    "Environment :: Win32 (MS Windows)",
     "Intended Audience :: Healthcare Industry",
     "Intended Audience :: Science/Research",
     "Operating System :: MacOS",
@@ -33,6 +40,9 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
     "Topic :: Utilities",
 ]
@@ -44,6 +54,8 @@ dependencies = [
 Homepage = "https://github.com/SugimotoKohei/dicom-organizer"
 Repository = "https://github.com/SugimotoKohei/dicom-organizer"
 Issues = "https://github.com/SugimotoKohei/dicom-organizer/issues"
+Discussions = "https://github.com/SugimotoKohei/dicom-organizer/discussions"
+Documentation = "https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/README.md"
 Changelog = "https://github.com/SugimotoKohei/dicom-organizer/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
@@ -55,6 +67,9 @@ gui = [
 dev = [
     "pytest>=9.0.3",
     "ruff>=0.15.13",
+]
+build = [
+    "pyinstaller>=6.22",
 ]
 
 [project.scripts]

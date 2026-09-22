@@ -19,7 +19,7 @@ This guide provides institutional IT administrators, security officers, and rese
 
 | Consideration | Technical Specification / Policy |
 |---|---|
-| **Supported Platforms** | Automated tests are executed in CI (GitHub Actions) on `ubuntu-latest`, `macos-latest`, and `windows-latest` for Python 3.11, plus test matrix on Ubuntu for Python 3.12, 3.13, and 3.14. Standalone desktop apps are built for Windows (x64) and macOS (arm64 & x86_64). Operation on other OS versions is unverified. |
+| **Supported Platforms** | Automated tests are executed in CI (GitHub Actions) on `ubuntu-latest`, `macos-latest`, and `windows-latest` for Python 3.14, plus test matrix on Ubuntu for Python 3.11, 3.12, and 3.13. Standalone desktop apps are built for Windows (x64) and macOS (arm64 & x86_64). Operation on other OS versions is unverified. |
 | **User Privileges Required** | **Standard user only**. No administrator (root / sudo) privileges are required. |
 | **Network Communications** | **No background network activity**. The application contains no network transmission code, no telemetry, and performs no automatic updates. Only when a user clicks "Documentation" in the GUI Help menu (Help -> Documentation), the default web browser opens the GitHub documentation page. |
 | **Input Data Safety** | **Read-only by default**: In default copy mode, list-only mode, and dry-run mode, source files are strictly opened in read-only mode and never modified. Source files are moved only when `--action move` is explicitly requested alongside `--confirm-move`. |
@@ -85,7 +85,7 @@ checksum = true
 
 | 項目 | 仕様および方針 |
 |---|---|
-| **対応 OS** | CI（GitHub Actions）で自動テストを実行しているのは `ubuntu-latest`、`macos-latest`、`windows-latest`（Python 3.11）、および Linux 上での Python 3.12・3.13・3.14 です。単体アプリをビルドするのは Windows（x64）と macOS（arm64・x86_64）です。これら以外の OS バージョンでの動作は未確認です。 |
+| **対応 OS** | CI（GitHub Actions）で自動テストを実行しているのは `ubuntu-latest`、`macos-latest`、`windows-latest`（Python 3.14）、および Linux 上での Python 3.11・3.12・3.13 です。単体アプリをビルドするのは Windows（x64）と macOS（arm64・x86_64）です。これら以外の OS バージョンでの動作は未確認です。 |
 | **必要権限** | **一般ユーザー権限のみ**。管理者権限（UAC 昇格、root、sudo）は一切不要です。 |
 | **ネットワーク通信** | **バックグラウンド通信ゼロ**。本体に通信コードはなく、利用状況やテレメトリ送信、自動更新チェック等も行いません。ただし、GUI の「ヘルプ」メニューから「ドキュメント」をクリックしたときだけ、既定のブラウザで GitHub の文書ページが開きます（クリックしなければ通信しません）。 |
 | **データの流れ（入力）** | **原則読み取り専用**: 既定の copy、一覧のみ（`--list-only`）、確認（`--dry-run`）では入力ファイルを読むだけで変更しません。明示的に `--action move`（要 `--confirm-move`）を選んだときだけ入力ファイルを移動します。 |

@@ -36,7 +36,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.14"
 
       - name: Check lockfile
         run: uv lock --check
@@ -99,14 +99,14 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.14"
 
       - name: Build wheel
         run: uv build --wheel
 
       - name: Test installation in clean venv (CLI only)
         run: |
-          uv venv --python 3.11 test-venv-cli
+          uv venv --python 3.14 test-venv-cli
           if [ -f "test-venv-cli/bin/python" ]; then
             PYTHON_BIN="test-venv-cli/bin/python"
             export PATH="$PWD/test-venv-cli/bin:$PATH"
@@ -123,7 +123,7 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: |
-          uv venv --python 3.11 test-venv-gui
+          uv venv --python 3.14 test-venv-gui
           if [ -f "test-venv-gui/bin/python" ]; then
             PYTHON_BIN="test-venv-gui/bin/python"
             export PATH="$PWD/test-venv-gui/bin:$PATH"
@@ -142,7 +142,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13", "3.14"]
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - name: Check out repository

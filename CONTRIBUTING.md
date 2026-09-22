@@ -11,7 +11,7 @@ Thank you for your interest in contributing to `dicom-organizer`. Whether you ar
 
 ### 1. Development Setup
 
-This project uses Python 3.11 and `uv`.
+This project uses Python 3.14 and `uv` for development (the supported user runtime remains Python 3.11 or later).
 
 ```bash
 git clone https://github.com/SugimotoKohei/dicom-organizer.git
@@ -59,7 +59,7 @@ You do not need deep Python internals experience to make a difference:
 
 ### 1. 開発環境のセットアップ
 
-本プロジェクトは Python 3.11 と `uv` を前提としています。
+本プロジェクトの開発環境は Python 3.14 と `uv` を前提としています（パッケージ利用者の対応環境は Python 3.11 以上です）。
 
 ```bash
 git clone https://github.com/SugimotoKohei/dicom-organizer.git

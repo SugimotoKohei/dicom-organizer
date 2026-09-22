@@ -51,7 +51,7 @@ codesign --verify --deep --strict dist/standalone/dicom-organizer.app
 Confirm that:
 - `uv build` generates valid source distribution (`.tar.gz`) and binary wheel (`.whl`).
 - `scripts/generate_column_docs.py --check` reports `docs/csv-columns.md is up to date.` without differences.
-- `scripts/build_standalone.py --smoke-test` packages `dist/standalone/dicom-organizer-<version>-<os>-<arch>.zip`, checks bundle signature with `codesign --verify --deep --strict`, generates `SHA256SUMS.txt`, and passes all smoke tests (`--version`, `--self-test`, `--gui-smoke-test`).
+- `scripts/build_standalone.py --smoke-test` packages `dist/standalone/dicom-organizer-<version>-<os>-<arch>.zip` (bundling Python 3.14), checks bundle signature with `codesign --verify --deep --strict`, generates `SHA256SUMS.txt`, and passes all smoke tests (`--version`, `--self-test`, `--gui-smoke-test`).
 
 ---
 
@@ -72,7 +72,7 @@ Pushing the release tag triggers `.github/workflows/release.yml` and `.github/wo
 
 > [!IMPORTANT]
 > **Windows and Intel Mac CI Verification**:
-> Standalone applications for **Windows** (x64) and **Intel Mac** (x86_64) are built for the first time on GitHub Actions CI runners (since local development is on Apple Silicon macOS).
+> Standalone applications for **Windows** (x64) and **Intel Mac** (x86_64) are built with Python 3.14 for the first time on GitHub Actions CI runners (since local development is on Apple Silicon macOS).
 > - Always verify that CI runs on `windows-latest` (Windows x64), `macos-15` (Apple Silicon arm64), and `macos-15-intel` (Intel x86_64) complete successfully.
 > - Verify that the standalone self-test (`--self-test`) and CLI version checks succeed on both Windows and Intel CI runners before finalizing the release.
 > - Confirm that release artifacts (`.zip` archives and aggregated `SHA256SUMS.txt`) are generated and attached to the GitHub Release draft.

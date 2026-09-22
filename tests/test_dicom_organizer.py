@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,7 @@ def write_dicom(
     series_number: int,
     instance_number: int,
     patient_name: str = "Test^Patient",
+    patient_id: str = "PID001",
     acquisition_date: str = "20260515",
     echo_time: float = 10.0,
     phase_encoding_direction: str | None = "ROW",
@@ -91,6 +93,8 @@ def write_dicom(
     ge_acquisition_duration_us: float | None = None,
     ge_private_creator: str = "GEMS_ACQU_01",
     siemens_total_scan_time_sec: float | None = None,
+    issuer_of_patient_id: str | None = None,
+    specific_character_set: str | None = None,
 ) -> None:
     if sop_class_uid is None:
         sop_class_uid = {
@@ -107,6 +111,8 @@ def write_dicom(
     file_meta.ImplementationClassUID = generate_uid()
 
     ds = FileDataset(str(path), {}, file_meta=file_meta, preamble=b"\0" * 128)
+    if specific_character_set is not None:
+        ds.SpecificCharacterSet = specific_character_set
     ds.SOPClassUID = sop_class_uid
     ds.SOPInstanceUID = sop_uid
     ds.SeriesInstanceUID = series_uid
@@ -129,7 +135,9 @@ def write_dicom(
     ds.SeriesDescription = series_description or f"Series {series_number}"
     ds.ProtocolName = protocol_name or f"Protocol {series_number}"
     ds.PatientName = patient_name
-    ds.PatientID = "PID001"
+    ds.PatientID = patient_id
+    if issuer_of_patient_id is not None:
+        ds.IssuerOfPatientID = issuer_of_patient_id
     ds.Rows = 16
     ds.Columns = 16
     ds.PixelSpacing = [1.5, 1.5]
@@ -1421,8 +1429,8 @@ def test_patient_mode_keep_hash_and_drop(tmp_path: Path) -> None:
         drop_row = next(csv.DictReader(handle))
     assert drop_row["PatientName"] == "N/A"
     assert drop_row["PatientID"] == "N/A"
-    assert drop_row["PatientNameHash"] != "N/A"
-    assert drop_row["PatientIDHash"] != "N/A"
+    assert drop_row["PatientNameHash"] == "N/A"
+    assert drop_row["PatientIDHash"] == "N/A"
 
 
 def test_custom_dicom_tags_are_written_to_metadata_csv(tmp_path: Path) -> None:
@@ -2870,6 +2878,546 @@ def test_file_report_sorted_by_source_filename_r11(tmp_path: Path) -> None:
     source_names = [r["SourceFileName"] for r in rows]
     assert source_names == sorted(source_names)
     assert source_names[0] == ".hidden_file"
+
+
+def test_list_only_mode(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    input_root.mkdir()
+    series_uid = generate_uid()
+    for inst in (1, 2):
+        write_dicom(
+            input_root / f"img_{inst}.dcm",
+            series_uid=series_uid,
+            sop_uid=generate_uid(),
+            series_number=1,
+            instance_number=inst,
+            acquisition_date="20260515",
+        )
+    (input_root / "not_a_dicom.txt").write_text("hello", encoding="utf-8")
+
+    parsed = parse_args([str(input_root), "--list-only"])
+    opts = normalize_options(parsed)
+    assert opts.list_only is True
+    assert opts.output_root == (input_root / "organized_list").resolve()
+
+    events: list[ProgressEvent] = []
+    result = run(opts, progress=events.append)
+    assert result.status == "completed"
+    assert result.list_only is True
+
+    out = opts.output_root
+    entries = sorted(p.name for p in out.iterdir())
+    assert entries == [
+        "all_dicom_parameters.csv",
+        "all_series_summary.csv",
+        "file_report.csv",
+        "organize_summary.json",
+    ]
+    assert not list(out.rglob("*.dcm"))
+
+    with (out / "all_dicom_parameters.csv").open(encoding="utf-8-sig", newline="") as h:
+        params = list(csv.DictReader(h))
+    assert len(params) == 2
+    assert all(r["OrganizedFileName"] == "N/A" for r in params)
+    assert all(r["SeriesFolder"].startswith("UnitTest_Synthetic/20260515/000001_") for r in params)
+    assert {r["FileCount"] for r in params} == {"2"}
+
+    with (out / "all_series_summary.csv").open(encoding="utf-8-sig", newline="") as h:
+        summaries = list(csv.DictReader(h))
+    assert len(summaries) == 1
+
+    with (out / "file_report.csv").open(encoding="utf-8-sig", newline="") as h:
+        report = list(csv.DictReader(h))
+    statuses = [(r["Status"], r["Reason"]) for r in report]
+    assert statuses.count(("listed", "N/A")) == 2
+    assert ("skipped", "not_dicom") in statuses
+
+    summary = json.loads((out / "organize_summary.json").read_text(encoding="utf-8"))
+    assert summary["list_only"] is True
+    assert summary["listed_files"] == 2
+    assert summary["organized_files"] == 0
+
+    stages: list[str] = []
+    for e in events:
+        if e.stage not in stages:
+            stages.append(e.stage)
+    assert stages == ["discover", "read", "plan", "write"]
+
+    # Re-run does not accumulate rows
+    run(opts)
+    with (out / "all_dicom_parameters.csv").open(encoding="utf-8-sig", newline="") as h:
+        params_rerun = list(csv.DictReader(h))
+    assert len(params_rerun) == 2
+
+    # Dry-run writes nothing
+    dry_out = tmp_path / "dry"
+    dry_result = run(replace(opts, output_root=dry_out), dry_run=True)
+    assert dry_result.status == "dry_run"
+    assert not dry_out.exists()
+
+
+def test_folder_columns_and_legacy_csv_derivation(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    input_root.mkdir()
+    series_uid = generate_uid()
+    sop_uid = generate_uid()
+    write_dicom(
+        input_root / "img.dcm",
+        series_uid=series_uid,
+        sop_uid=sop_uid,
+        series_number=1,
+        instance_number=1,
+        acquisition_date="20260515",
+    )
+    out = tmp_path / "out"
+    run(OrganizeOptions(input_root=input_root, output_root=out))
+
+    study_dir = out / "UnitTest_Synthetic" / "20260515"
+    with (study_dir / "dicom_parameters.csv").open(encoding="utf-8-sig", newline="") as h:
+        param_reader = csv.DictReader(h)
+        param_cols = list(param_reader.fieldnames or [])
+        param_rows = list(param_reader)
+    assert param_cols[:4] == ["OrganizedFileName", "StudyFolder", "SeriesFolder", "SeriesUID"]
+    assert param_rows[0]["StudyFolder"] == "UnitTest_Synthetic/20260515"
+    assert param_rows[0]["OrganizedFileName"].startswith(param_rows[0]["SeriesFolder"] + "/")
+
+    with (study_dir / "series_summary.csv").open(encoding="utf-8-sig", newline="") as h:
+        summary_reader = csv.DictReader(h)
+        summary_cols = list(summary_reader.fieldnames or [])
+        summary_rows = list(summary_reader)
+    assert summary_cols[:4] == ["StudyFolder", "SeriesFolder", "AcquisitionDate", "SeriesNumber"]
+    assert summary_rows[0]["StudyFolder"] == "UnitTest_Synthetic/20260515"
+    assert summary_rows[0]["SeriesFolder"] == param_rows[0]["SeriesFolder"]
+
+    # Legacy CSV rows without StudyFolder/SeriesFolder derivation check
+    legacy_row = {
+        "OrganizedFileName": "UnitTest_Synthetic/20260515/000001_Test/000001.dcm",
+        "SeriesUID": "1.2.3.4",
+        "InstanceNumber": "1",
+    }
+    legacy_csv = tmp_path / "legacy.csv"
+    dummy_file = out / legacy_row["OrganizedFileName"]
+    dummy_file.parent.mkdir(parents=True, exist_ok=True)
+    dummy_file.touch()
+
+    with legacy_csv.open("w", encoding="utf-8-sig", newline="") as h:
+        writer = csv.DictWriter(h, fieldnames=["OrganizedFileName", "SeriesUID", "InstanceNumber"])
+        writer.writeheader()
+        writer.writerow(legacy_row)
+
+    from dicom_organizer.core import existing_metadata_rows
+    recovered = existing_metadata_rows(legacy_csv, out, set())
+    assert len(recovered) == 1
+    assert recovered[0]["SeriesFolder"] == "UnitTest_Synthetic/20260515/000001_Test"
+    assert recovered[0]["StudyFolder"] == "UnitTest_Synthetic/20260515"
+
+
+def test_all_series_summary_generation_and_incremental(tmp_path: Path) -> None:
+    input_a = tmp_path / "input_a"
+    input_a.mkdir()
+    series_a = generate_uid()
+    for inst in (1, 2):
+        write_dicom(
+            input_a / f"img_a_{inst}.dcm",
+            series_uid=series_a,
+            sop_uid=generate_uid(),
+            series_number=1,
+            instance_number=inst,
+            acquisition_date="20260515",
+        )
+
+    out = tmp_path / "out"
+    run(OrganizeOptions(input_root=input_a, output_root=out))
+
+    all_summary_path = out / "all_series_summary.csv"
+    assert all_summary_path.exists()
+    with all_summary_path.open(encoding="utf-8-sig", newline="") as h:
+        reader = csv.DictReader(h)
+        cols = list(reader.fieldnames or [])
+        rows_a = list(reader)
+    assert cols[:2] == ["StudyFolder", "SeriesFolder"]
+    assert len(rows_a) == 1
+
+    summary_json_path = out / "organize_summary.json"
+    summary_data = json.loads(summary_json_path.read_text(encoding="utf-8"))
+    assert "all_series_summary.csv" in summary_data["reports"]
+
+    # Incremental run with input_b
+    input_b = tmp_path / "input_b"
+    input_b.mkdir()
+    series_b = generate_uid()
+    write_dicom(
+        input_b / "img_b_1.dcm",
+        series_uid=series_b,
+        sop_uid=generate_uid(),
+        series_number=2,
+        instance_number=1,
+        acquisition_date="20260516",
+    )
+    run(OrganizeOptions(input_root=input_b, output_root=out, if_exists="skip"))
+
+    with all_summary_path.open(encoding="utf-8-sig", newline="") as h:
+        reader = csv.DictReader(h)
+        rows_ab = list(reader)
+    assert len(rows_ab) == 2
+    folders = sorted({r["StudyFolder"] for r in rows_ab})
+    assert folders == ["UnitTest_Synthetic/20260515", "UnitTest_Synthetic/20260516"]
+
+
+def test_layout_presets_and_template_keys(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    input_root.mkdir()
+    study_uid_1 = generate_uid()
+    study_uid_2 = generate_uid()
+
+    write_dicom(
+        input_root / "s1.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        study_uid=study_uid_1,
+        patient_id="PID001",
+        acquisition_date="20260515",
+    )
+    write_dicom(
+        input_root / "s2.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=2,
+        instance_number=1,
+        study_uid=study_uid_2,
+        patient_id="PID001",
+        acquisition_date="20260515",
+    )
+
+    from dicom_organizer.core import LAYOUTS, hash_text
+
+    assert tuple(LAYOUTS) == ("device-date", "study", "patient-study")
+    key1 = hash_text(study_uid_1, 8)
+    key2 = hash_text(study_uid_2, 8)
+
+    # 1. device-date
+    out_device = tmp_path / "out_device"
+    run(OrganizeOptions(input_root=input_root, output_root=out_device, layout="device-date"))
+    device_dirs = sorted(p.parent.relative_to(out_device).as_posix() for p in out_device.rglob("dicom_parameters.csv"))
+    assert device_dirs == ["UnitTest_Synthetic/20260515"]
+
+    # 2. study
+    out_study = tmp_path / "out_study"
+    run(OrganizeOptions(input_root=input_root, output_root=out_study, layout="study"))
+    study_dirs = sorted(p.parent.relative_to(out_study).as_posix() for p in out_study.rglob("dicom_parameters.csv"))
+    assert study_dirs == sorted([f"20260515_{key1}", f"20260515_{key2}"])
+
+    # 3. patient-study (keep)
+    out_patient_keep = tmp_path / "out_patient_keep"
+    run(OrganizeOptions(input_root=input_root, output_root=out_patient_keep, layout="patient-study", patient_mode="keep"))
+    p_keep_dirs = sorted(p.parent.relative_to(out_patient_keep).as_posix() for p in out_patient_keep.rglob("dicom_parameters.csv"))
+    assert p_keep_dirs == sorted([f"PID001/20260515_{key1}", f"PID001/20260515_{key2}"])
+
+    # 4. patient-study (hash)
+    pseudonym = "P-" + hashlib.sha256(b"|PID001").hexdigest()[:12]
+    out_patient_hash = tmp_path / "out_patient_hash"
+    run(OrganizeOptions(input_root=input_root, output_root=out_patient_hash, layout="patient-study", patient_mode="hash"))
+    p_hash_dirs = sorted(p.parent.relative_to(out_patient_hash).as_posix() for p in out_patient_hash.rglob("dicom_parameters.csv"))
+    assert p_hash_dirs == sorted([f"{pseudonym}/20260515_{key1}", f"{pseudonym}/20260515_{key2}"])
+    all_paths_text = "\n".join(p.as_posix() for p in out_patient_hash.rglob("*"))
+    assert "PID001" not in all_paths_text
+
+    # 5. Template with study_key and patient_key
+    out_tmpl = tmp_path / "out_tmpl"
+    run(
+        OrganizeOptions(
+            input_root=input_root,
+            output_root=out_tmpl,
+            layout="study",
+            series_dir_template="{study_key}_{series_number}",
+            file_template="{study_key}_{instance_number}.dcm",
+        )
+    )
+    tmpl_files = list(out_tmpl.rglob("*.dcm"))
+    assert len(tmpl_files) == 2
+    assert any(key1 in f.name for f in tmpl_files)
+    assert any(key2 in f.name for f in tmpl_files)
+
+
+def test_privacy_drop_notices_and_tag_warnings(tmp_path: Path) -> None:
+    from dicom_organizer import messages
+    from dicom_organizer.core import patient_data_notices
+
+    input_root = tmp_path / "input"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "img.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        patient_name="Yamada^Taro",
+        patient_id="PID999",
+    )
+
+    # 1. drop mode: all 4 patient columns are N/A
+    out_drop = tmp_path / "out_drop"
+    run(OrganizeOptions(input_root=input_root, output_root=out_drop, patient_mode="drop"))
+    with (out_drop / "UnitTest_Synthetic" / "20260515" / "dicom_parameters.csv").open(
+        encoding="utf-8-sig", newline=""
+    ) as h:
+        drop_rows = list(csv.DictReader(h))
+    for col in ("PatientName", "PatientID", "PatientNameHash", "PatientIDHash"):
+        assert drop_rows[0][col] == "N/A"
+
+    # hash mode check
+    out_hash = tmp_path / "out_hash"
+    run(OrganizeOptions(input_root=input_root, output_root=out_hash, patient_mode="hash"))
+    with (out_hash / "UnitTest_Synthetic" / "20260515" / "dicom_parameters.csv").open(
+        encoding="utf-8-sig", newline=""
+    ) as h:
+        hash_rows = list(csv.DictReader(h))
+    assert hash_rows[0]["PatientName"].startswith("sha256:")
+    assert hash_rows[0]["PatientNameHash"] != "N/A"
+
+    # 2. patient_data_notices return codes
+    base_opts = OrganizeOptions(input_root=input_root, output_root=out_drop)
+    assert patient_data_notices(base_opts) == [
+        "csv_patient_fields_kept",
+        "dicom_files_unchanged",
+        "csv_other_identifiers",
+    ]
+    hash_opts = replace(
+        base_opts,
+        patient_mode="hash",
+        list_only=True,
+        dicom_tags=("EchoTime",),
+        layout="patient-study",
+    )
+    assert patient_data_notices(hash_opts) == [
+        "csv_patient_fields_hashed",
+        "no_dicom_copies",
+        "csv_other_identifiers",
+        "custom_tags_written",
+        "folder_names_contain_patient_key",
+    ]
+
+    # 3. messages.notice_text for all codes
+    import re
+
+    for code in messages.NOTICE_CODES:
+        en = messages.notice_text(code, "en")
+        ja = messages.notice_text(code, "ja")
+        assert en.strip() and ja.strip() and en != ja
+        assert re.search(r"[぀-ヿ一-鿿]", ja)
+
+    # 4. Custom tag warnings
+    out_warn = tmp_path / "out_warn"
+    res_warn = run(
+        OrganizeOptions(
+            input_root=input_root,
+            output_root=out_warn,
+            patient_mode="hash",
+            dicom_tags=("PatientBirthDate",),
+        )
+    )
+    assert any("PatientBirthDate" in w for w in res_warn.warnings)
+
+    out_nowarn = tmp_path / "out_nowarn"
+    res_nowarn = run(
+        OrganizeOptions(
+            input_root=input_root,
+            output_root=out_nowarn,
+            patient_mode="keep",
+            dicom_tags=("PatientBirthDate",),
+        )
+    )
+    assert not any("PatientBirthDate" in w for w in res_nowarn.warnings)
+
+    out_safe = tmp_path / "out_safe"
+    res_safe = run(
+        OrganizeOptions(
+            input_root=input_root,
+            output_root=out_safe,
+            patient_mode="drop",
+            dicom_tags=("EchoTime",),
+        )
+    )
+    assert not any("EchoTime" in w for w in res_safe.warnings)
+
+
+def test_patient_study_layout_non_ascii_patient_id(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+
+    # Patient 1: 山田001 (SpecificCharacterSet="ISO_IR 192")
+    write_dicom(
+        input_root / "p1.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        patient_id="山田001",
+        specific_character_set="ISO_IR 192",
+    )
+    # Patient 2: 田中002 (SpecificCharacterSet="ISO_IR 192")
+    write_dicom(
+        input_root / "p2.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        patient_id="田中002",
+        specific_character_set="ISO_IR 192",
+    )
+    # Patient 3: 山田 (safe_name only would result in "NA")
+    write_dicom(
+        input_root / "p3.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        patient_id="山田",
+        specific_character_set="ISO_IR 192",
+    )
+    # Patient 4: 田中 (safe_name only would result in "NA")
+    write_dicom(
+        input_root / "p4.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        patient_id="田中",
+        specific_character_set="ISO_IR 192",
+    )
+    # Patient 5: ASCII ID PID001 (should remain "PID001" without hash suffix)
+    write_dicom(
+        input_root / "p5.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        patient_id="PID001",
+    )
+
+    res = run(
+        OrganizeOptions(
+            input_root=input_root,
+            output_root=output_root,
+            layout="patient-study",
+            patient_mode="keep",
+        )
+    )
+    assert res.status == "completed"
+
+    patient_dirs = sorted([p.name for p in output_root.iterdir() if p.is_dir()])
+    assert len(patient_dirs) == 5
+
+    assert "PID001" in patient_dirs
+
+    p1_expected = f"001-{hashlib.sha256('山田001'.encode()).hexdigest()[:8]}"
+    p2_expected = f"002-{hashlib.sha256('田中002'.encode()).hexdigest()[:8]}"
+    p3_expected = f"NA-{hashlib.sha256('山田'.encode()).hexdigest()[:8]}"
+    p4_expected = f"NA-{hashlib.sha256('田中'.encode()).hexdigest()[:8]}"
+
+    assert p1_expected in patient_dirs
+    assert p2_expected in patient_dirs
+    assert p3_expected in patient_dirs
+    assert p4_expected in patient_dirs
+    assert p3_expected != p4_expected
+
+
+def test_list_only_ordering_matches_regular_organization(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    input_root.mkdir()
+
+    study1_uid = generate_uid()
+    study2_uid = generate_uid()
+
+    # Study 1 (20260101) with Series 1 & 2
+    write_dicom(
+        input_root / "s1_ser1.dcm",
+        study_uid=study1_uid,
+        acquisition_date="20260101",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+    )
+    write_dicom(
+        input_root / "s1_ser2.dcm",
+        study_uid=study1_uid,
+        acquisition_date="20260101",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=2,
+        instance_number=1,
+    )
+
+    # Study 2 (20260202) with Series 1 & 2
+    write_dicom(
+        input_root / "s2_ser1.dcm",
+        study_uid=study2_uid,
+        acquisition_date="20260202",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+    )
+    write_dicom(
+        input_root / "s2_ser2.dcm",
+        study_uid=study2_uid,
+        acquisition_date="20260202",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=2,
+        instance_number=1,
+    )
+
+    # 1. Regular organization
+    out_regular = tmp_path / "out_regular"
+    res_regular = run(OrganizeOptions(input_root=input_root, output_root=out_regular))
+    assert res_regular.status == "completed"
+
+    reg_summary_csv = out_regular / "all_series_summary.csv"
+    with reg_summary_csv.open(encoding="utf-8-sig") as f:
+        reg_summary_rows = list(csv.DictReader(f))
+
+    reg_keys = [(r["StudyFolder"], r["SeriesNumber"], r["SeriesFolder"]) for r in reg_summary_rows]
+
+    # 2. List-only mode
+    out_list = tmp_path / "out_list"
+    res_list = run(OrganizeOptions(input_root=input_root, output_root=out_list, list_only=True))
+    assert res_list.status == "completed"
+
+    list_summary_csv = out_list / "all_series_summary.csv"
+    with list_summary_csv.open(encoding="utf-8-sig") as f:
+        list_summary_rows = list(csv.DictReader(f))
+
+    list_keys = [(r["StudyFolder"], r["SeriesNumber"], r["SeriesFolder"]) for r in list_summary_rows]
+
+    assert list_keys == reg_keys
+
+    # Verify all_dicom_parameters.csv ordering: (StudyFolder, SeriesNumber, SeriesFolder, InstanceNumber, SourceFileName)
+    list_param_csv = out_list / "all_dicom_parameters.csv"
+    with list_param_csv.open(encoding="utf-8-sig") as f:
+        param_rows = list(csv.DictReader(f))
+
+    param_keys = [
+        (
+            r["StudyFolder"],
+            r["SeriesNumber"],
+            r["SeriesFolder"],
+            int(r["InstanceNumber"]) if r["InstanceNumber"].isdigit() else 0,
+            r["SourceFileName"],
+        )
+        for r in param_rows
+    ]
+    assert param_keys == sorted(param_keys)
+
+
+
+
+
+
 
 
 

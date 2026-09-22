@@ -152,6 +152,8 @@ def merge_columns(*groups: list[str] | tuple[str, ...]) -> list[str]:
 
 COMMON_METADATA_COLUMNS = [
     "OrganizedFileName",
+    "StudyFolder",
+    "SeriesFolder",
     "SeriesUID",
     "SOPInstanceUID",
     "SeriesNumber",
@@ -270,6 +272,8 @@ PER_INSTANCE_METADATA_COLUMNS = {
 
 COMMON_SUMMARY_COLUMNS = merge_columns(
     [
+        "StudyFolder",
+        "SeriesFolder",
         "AcquisitionDate",
         "SeriesNumber",
         "SeriesUID",
@@ -329,6 +333,7 @@ DEFAULT_FILE_TEMPLATE = "{instance_number_6}.dcm"
 ACTIONS = ("copy", "symlink", "hardlink", "move")
 IF_EXISTS_MODES = ("error", "skip", "overwrite", "rename")
 PATIENT_MODES = ("keep", "hash", "drop")
+LAYOUTS = ("device-date", "study", "patient-study")
 
 SIEMENS_PARALLEL_REDUCTION_FACTOR_PATTERN = re.compile(
     rb"(?:^|[\x00\r\n ])sPat\.lAccelFactPE\s*=\s*([0-9]+(?:\.[0-9]+)?)"
@@ -365,6 +370,8 @@ class OrganizeOptions:
     verbose: bool = False
     checksum: bool = False
     space_check: bool = True
+    list_only: bool = False
+    layout: str = "device-date"
 
 
 @dataclass(frozen=True)
@@ -442,6 +449,8 @@ class OrganizeResult:
     file_records: list[FileRecord] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     previous_run_status: str | None = None
+    list_only: bool = False
+    privacy_notices: list[str] = field(default_factory=list)
 
     @property
     def summary(self) -> dict[str, Any]:
@@ -451,6 +460,7 @@ class OrganizeResult:
             self.output_root,
             self.profile,
             status=self.status,
+            list_only=self.list_only,
         )
 
 
@@ -499,6 +509,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=IF_EXISTS_MODES,
         default="error",
         help="Behavior when the target file already exists. Default: error.",
+    )
+    parser.add_argument(
+        "--list-only",
+        action="store_true",
+        help="Do not copy DICOM files; write parameter tables and reports only.",
+    )
+    parser.add_argument(
+        "--layout",
+        choices=LAYOUTS,
+        default="device-date",
+        help="Organization layout preset: device-date, study, or patient-study. Default: device-date.",
     )
     parser.add_argument(
         "-n",
@@ -640,12 +661,16 @@ def normalize_options(
         options = replace(args, **overrides)
     else:
         input_root = resolved_root(args.input)
+        is_list_only = bool(getattr(args, "list_only", False))
         output_value = getattr(args, "output", None)
-        output_root = (
-            resolved_root(output_value)
-            if output_value
-            else input_root / "organized"
-        )
+        if is_list_only and not output_value:
+            output_root = input_root / "organized_list"
+        else:
+            output_root = (
+                resolved_root(output_value)
+                if output_value
+                else input_root / "organized"
+            )
         options = OrganizeOptions(
             input_root=input_root,
             output_root=output_root,
@@ -670,6 +695,8 @@ def normalize_options(
             verbose=bool(getattr(args, "verbose", False)),
             checksum=bool(getattr(args, "checksum", False)),
             space_check=bool(getattr(args, "space_check", True)),
+            list_only=is_list_only,
+            layout=str(getattr(args, "layout", "device-date") or "device-date"),
         )
 
     if validate:
@@ -682,6 +709,8 @@ def validate_options(options: OrganizeOptions) -> None:
         raise ValueError(f"Unsupported --action value: {options.action}")
     if options.if_exists not in IF_EXISTS_MODES:
         raise ValueError(f"Unsupported --if-exists value: {options.if_exists}")
+    if options.layout not in LAYOUTS:
+        raise ValueError(f"Unsupported --layout value: {options.layout}")
     if options.profile not in PROFILE_NAMES:
         raise ValueError(f"Unsupported --profile value: {options.profile}")
     if options.patient_mode not in PATIENT_MODES:
@@ -856,6 +885,8 @@ def private_text_fields(raw: str, mode: str) -> tuple[str, str]:
         return raw, digest
     if mode == "hash":
         return f"sha256:{digest}", digest
+    if mode == "drop":
+        return "N/A", "N/A"
     return "N/A", digest
 
 
@@ -873,6 +904,96 @@ def safe_name(value: str, fallback: str = "NA") -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._+-]+", "-", value.strip())
     cleaned = cleaned.strip("-_.")
     return cleaned or fallback
+
+
+def compute_study_key(study_uid: str) -> str:
+    return hash_text(study_uid, 8)
+
+
+def compute_patient_key(patient_id: str, issuer: str, patient_mode: str) -> str:
+    if not patient_id or patient_id == "N/A":
+        return "unknown-patient"
+    if patient_mode == "keep":
+        if issuer and issuer != "N/A":
+            raw_key = f"{patient_id}_{issuer}"
+        else:
+            raw_key = patient_id
+        sanitized = safe_name(raw_key)
+        if sanitized != raw_key:
+            digest = hashlib.sha256(raw_key.encode("utf-8")).hexdigest()[:8]
+            return f"{sanitized}-{digest}"
+        return sanitized
+    issuer_part = issuer if (issuer and issuer != "N/A") else ""
+    raw = f"{issuer_part}|{patient_id}"
+    return "P-" + hashlib.sha256(raw.encode()).hexdigest()[:12]
+
+
+def compute_study_folder(
+    layout: str,
+    device_folder: str,
+    study_date: str,
+    study_key: str,
+    patient_key: str,
+) -> str:
+    if layout == "device-date":
+        return f"{device_folder}/{study_date}"
+    if layout == "study":
+        return f"{study_date}_{study_key}"
+    if layout == "patient-study":
+        return f"{patient_key}/{study_date}_{study_key}"
+    raise ValueError(f"Unsupported layout: {layout}")
+
+
+DIRECT_IDENTIFIER_TAGS = {
+    "PatientName",
+    "PatientID",
+    "IssuerOfPatientID",
+    "OtherPatientIDs",
+    "OtherPatientIDsSequence",
+    "OtherPatientNames",
+    "PatientBirthName",
+    "PatientBirthDate",
+    "PatientBirthTime",
+    "PatientAddress",
+    "PatientTelephoneNumbers",
+    "PatientMotherBirthName",
+    "MedicalRecordLocator",
+    "AccessionNumber",
+    "ReferringPhysicianName",
+    "PerformingPhysicianName",
+    "OperatorsName",
+    "InstitutionName",
+    "InstitutionAddress",
+}
+
+
+def patient_data_notices(options: OrganizeOptions) -> list[str]:
+    """Return stable notice codes describing what patient information remains."""
+    notices: list[str] = []
+    if options.patient_mode == "keep":
+        notices.append("csv_patient_fields_kept")
+    elif options.patient_mode == "hash":
+        notices.append("csv_patient_fields_hashed")
+    elif options.patient_mode == "drop":
+        notices.append("csv_patient_fields_dropped")
+
+    if options.list_only:
+        notices.append("no_dicom_copies")
+    else:
+        notices.append("dicom_files_unchanged")
+
+    notices.append("csv_other_identifiers")
+
+    if options.dicom_tags:
+        notices.append("custom_tags_written")
+
+    if options.layout == "patient-study":
+        if options.patient_mode == "keep":
+            notices.append("folder_names_contain_patient_id")
+        else:
+            notices.append("folder_names_contain_patient_key")
+
+    return notices
 
 
 def safe_date(value: str, fallback: str = "unknown_date") -> str:
@@ -1539,16 +1660,23 @@ def file_context(
     for spec in dicom_tag_specs:
         row[spec.column] = dicom_tag_value(ds, spec.tag)
 
+    study_instance_uid = ds_value(ds, "StudyInstanceUID", default="")
     study_date = safe_date(
         ds_value(
             ds, "StudyDate", default=ds_value(ds, "AcquisitionDate", default="unknown_date")
         )
     )
     device_folder = device_folder_name(manufacturer, ds_value(ds, "ManufacturerModelName"))
+    patient_id_raw = ds_value(ds, "PatientID", default="")
+    issuer = ds_value(ds, "IssuerOfPatientID", default="")
+    study_key = compute_study_key(study_instance_uid)
+    patient_key = compute_patient_key(patient_id_raw, issuer, patient_mode)
 
     return {
-        "study_instance_uid": ds_value(ds, "StudyInstanceUID", default=""),
+        "study_instance_uid": study_instance_uid,
         "study_date": study_date,
+        "study_key": study_key,
+        "patient_key": patient_key,
         "device_folder": device_folder,
         "acquisition_date": safe_date(
             ds_value(
@@ -1972,6 +2100,8 @@ def write_file_report(
 
 def collect_reports(output_root: Path, items: list[OrganizedItem]) -> list[str]:
     reports: list[str] = ["file_report.csv"]
+    if (output_root / "all_series_summary.csv").exists():
+        reports.append("all_series_summary.csv")
     group_dirs = sorted({item.destination.parent.parent for item in items}, key=lambda p: str(p))
     for group_dir in group_dirs:
         try:
@@ -2237,11 +2367,19 @@ def plan_organization(
         )
         study_date = context["study_date"]
         device_folder = context["device_folder"]
+        study_folder = compute_study_folder(
+            options.layout,
+            device_folder,
+            study_date,
+            context["study_key"],
+            context["patient_key"],
+        )
+
         filename = safe_name(format_template(options.file_template, context, "file"))
 
         rec = FileRecord(
             source=source,
-            status="planned" if options.dry_run else "organized",
+            status="planned" if options.dry_run else ("listed" if options.list_only else "organized"),
             reason="duplicate_conflict" if is_conflict_dup else "N/A",
             detail="duplicate SOPInstanceUID with different content"
             if is_conflict_dup
@@ -2263,8 +2401,9 @@ def plan_organization(
                 source,
                 context,
                 filename,
-                (device_folder, study_date, context["series_uid"]),
+                (study_folder, context["series_uid"]),
                 rec,
+                study_folder,
             )
         )
         file_records.append(rec)
@@ -2338,9 +2477,9 @@ def plan_organization(
         return [], file_records, stats, excluded_dirs, limit_reached, True
 
     pending_assignments = resolved_series_assignments(
-        [(s, c, f, k) for s, c, f, k, _r in pending_sources]
+        [(s, c, f, k) for s, c, f, k, _r, _sf in pending_sources]
     )
-    pending: list[tuple[Path, dict[str, Any], str, tuple[Any, ...], FileRecord]] = []
+    pending: list[tuple[Path, dict[str, Any], str, tuple[Any, ...], FileRecord, str]] = []
     series_order: list[tuple[Any, ...]] = []
     base_dir_by_series: dict[tuple[Any, ...], Path] = {}
     for (
@@ -2349,6 +2488,7 @@ def plan_organization(
         filename,
         _base_series_key,
         rec,
+        study_folder,
     ), (series_key, series_context) in zip(pending_sources, pending_assignments):
         series_template_context = dict(context)
         series_template_context.update(series_context)
@@ -2357,22 +2497,37 @@ def plan_organization(
         )
         base_dir = ensure_within_output_root(
             output_root,
-            output_root
-            / context["device_folder"]
-            / context["study_date"]
-            / series_dir_name,
+            output_root / study_folder / series_dir_name,
         )
         if series_key not in base_dir_by_series:
             base_dir_by_series[series_key] = base_dir
             series_order.append(series_key)
-        pending.append((source, context, filename, series_key, rec))
+        pending.append((source, context, filename, series_key, rec, study_folder))
 
     series_dirs = assign_series_dirs(base_dir_by_series, series_order)
     seen_destinations: set[Path] = set()
     items: list[OrganizedItem] = []
 
-    for source, context, filename, series_key, rec in pending:
+    for source, context, filename, series_key, rec, study_folder in pending:
         destination = series_dirs[series_key] / filename
+        series_folder_rel = series_dirs[series_key].relative_to(output_root).as_posix()
+        study_folder_rel = Path(study_folder).as_posix()
+
+        if options.list_only:
+            if destination in seen_destinations:
+                resolved = suffixed_path(destination, seen_destinations)
+            else:
+                resolved = destination
+            seen_destinations.add(resolved)
+            rec.destination = None
+            rec.status = "planned" if options.dry_run else "listed"
+            row = dict(context["row"])
+            row["OrganizedFileName"] = "N/A"
+            row["StudyFolder"] = study_folder_rel
+            row["SeriesFolder"] = series_folder_rel
+            items.append(OrganizedItem(source=source, destination=resolved, row=row))
+            continue
+
         resolved = resolve_collision(
             destination,
             seen_destinations,
@@ -2393,6 +2548,8 @@ def plan_organization(
         rec.destination = resolved
         row = dict(context["row"])
         row["OrganizedFileName"] = resolved.relative_to(output_root).as_posix()
+        row["StudyFolder"] = study_folder_rel
+        row["SeriesFolder"] = series_folder_rel
         items.append(OrganizedItem(source=source, destination=resolved, row=row))
 
         if options.dry_run and options.if_exists == "error":
@@ -2435,7 +2592,14 @@ def existing_metadata_rows(
             target = output_root / name
             if not (target.exists() or target.is_symlink()):
                 continue                      # Drop rows whose target no longer exists
-            rows.append({key: (value or "N/A") for key, value in raw.items() if key})
+            row = {key: (value or "N/A") for key, value in raw.items() if key}
+            if row.get("SeriesFolder", "N/A") == "N/A" and name:
+                parts = name.split("/")
+                if len(parts) >= 2:
+                    row["SeriesFolder"] = "/".join(parts[:-1])
+                if len(parts) >= 3 and row.get("StudyFolder", "N/A") == "N/A":
+                    row["StudyFolder"] = "/".join(parts[:-2])
+            rows.append(row)
     return rows
 
 
@@ -2486,6 +2650,48 @@ def write_metadata_tables(
                 extra_metadata_columns,
             ),
         )
+    write_all_series_summary(output_root)
+
+
+def write_all_series_summary(output_root: Path) -> Path | None:
+    summary_files = sorted(
+        [
+            p
+            for p in output_root.rglob("series_summary.csv")
+            if p.is_file() and p.name == "series_summary.csv"
+        ],
+        key=lambda p: p.as_posix(),
+    )
+    if not summary_files:
+        return None
+
+    all_rows: list[dict[str, str]] = []
+    seen_columns: list[str] = ["StudyFolder", "SeriesFolder"]
+    known_cols_set = set(seen_columns)
+
+    for summary_path in summary_files:
+        study_folder_default = summary_path.parent.relative_to(output_root).as_posix()
+        with summary_path.open(encoding="utf-8-sig", newline="") as h:
+            reader = csv.DictReader(h)
+            for col in reader.fieldnames or []:
+                if col not in known_cols_set:
+                    seen_columns.append(col)
+                    known_cols_set.add(col)
+            for raw_row in reader:
+                row = dict(raw_row)
+                if not row.get("StudyFolder") or row["StudyFolder"] == "N/A":
+                    row["StudyFolder"] = study_folder_default
+                if not row.get("SeriesFolder") or row["SeriesFolder"] == "N/A":
+                    org_file = row.get("OrganizedFileName", "")
+                    if org_file and org_file != "N/A":
+                        row["SeriesFolder"] = "/".join(org_file.split("/")[:-1])
+                    else:
+                        row["SeriesFolder"] = study_folder_default
+                all_rows.append(row)
+
+    out_path = output_root / "all_series_summary.csv"
+    write_csv(out_path, seen_columns, all_rows)
+    return out_path
 
 
 def write_csv(path: Path, columns: list[str], rows: list[dict[str, str]]) -> None:
@@ -2509,6 +2715,9 @@ def series_value(series_rows: list[dict[str, str]], column: str) -> str:
 
 
 def series_group_key(row: dict[str, str]) -> str:
+    folder = row.get("SeriesFolder", "")
+    if folder and folder != "N/A":
+        return folder
     return row.get("OrganizedFileName", "").rsplit("/", 1)[0]
 
 
@@ -2566,7 +2775,12 @@ def build_series_summary(
     columns = summary_columns_for_profile(profile_name, rows, extra_metadata_columns)
     summaries: list[dict[str, str]] = []
     for _series_dir, series_rows in sorted(
-        grouped.items(), key=lambda item: (item[1][0]["SeriesNumber"], item[0])
+        grouped.items(),
+        key=lambda item: (
+            str(item[1][0].get("StudyFolder", "")),
+            str(item[1][0].get("SeriesNumber", "")),
+            item[0],
+        ),
     ):
         summaries.append({column: series_value(series_rows, column) for column in columns})
     return summaries
@@ -2599,13 +2813,39 @@ def write_run_summary(
     reports: list[str] | None = None,
 ) -> None:
     by_series = Counter(
-        item.destination.parent.relative_to(output_root).as_posix() for item in items
+        item.row.get(
+            "SeriesFolder",
+            item.destination.parent.relative_to(output_root).as_posix()
+            if item.destination is not None
+            else "N/A",
+        )
+        for item in items
     )
     by_date = Counter(item.row["AcquisitionDate"] for item in items)
-    device_dates = Counter(
-        item.destination.parent.parent.relative_to(output_root).as_posix() for item in items
+    group_folders = Counter(
+        item.row.get(
+            "StudyFolder",
+            item.destination.parent.parent.relative_to(output_root).as_posix()
+            if item.destination is not None
+            else "N/A",
+        )
+        for item in items
     )
-    summary_counts = summarize_items(items, stats, output_root, options.profile, status=status)
+    study_count = len(
+        {
+            item.row.get("StudyInstanceUID")
+            for item in items
+            if item.row.get("StudyInstanceUID") and item.row.get("StudyInstanceUID") != "N/A"
+        }
+    )
+    summary_counts = summarize_items(
+        items,
+        stats,
+        output_root,
+        options.profile,
+        status=status,
+        list_only=options.list_only,
+    )
 
     skipped_by_reason: dict[str, int] = {}
     for reason in SKIP_REASONS:
@@ -2637,6 +2877,8 @@ def write_run_summary(
             "dicom_tags": list(options.dicom_tags),
             "checksum": options.checksum,
             "space_check": options.space_check,
+            "list_only": options.list_only,
+            "layout": options.layout,
         },
         "started_at": started_at,
         "ended_at": ended_at,
@@ -2653,7 +2895,7 @@ def write_run_summary(
         "dicom_tags": list(options.dicom_tags),
         "candidate_files": stats["candidate_files"],
         "planned_files": planned_files if planned_files is not None else len(items),
-        "organized_files": len(items),
+        "organized_files": 0 if options.list_only else len(items),
         "not_processed_files": not_processed_files,
         "csv_target_files": summary_counts["csv_target_files"],
         "csv_excluded_files": summary_counts["csv_excluded_files"],
@@ -2672,11 +2914,19 @@ def write_run_summary(
         or {"checked": False, "required_bytes": None, "free_bytes": None},
         "previous_run_status": previous_run_status,
         "warnings": warnings_list or [],
+        "privacy_notices": patient_data_notices(options),
         "reports": reports or [],
-        "device_dates": dict(sorted(device_dates.items())),
+        "layout": options.layout,
+        "group_folders": dict(sorted(group_folders.items())),
+        "study_count": study_count,
+        "device_dates": dict(sorted(group_folders.items())),
         "acquisition_dates": dict(sorted(by_date.items())),
         "series_count": len(by_series),
     }
+    if options.list_only:
+        summary["list_only"] = True
+        summary["listed_files"] = len(items)
+
     path = ensure_within_output_root(output_root, output_root / "organize_summary.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
@@ -2690,13 +2940,33 @@ def summarize_items(
     output_root: Path,
     profile_name: str = "auto",
     status: str = "completed",
+    list_only: bool = False,
 ) -> dict[str, Any]:
     by_date = Counter(item.row["AcquisitionDate"] for item in items)
-    device_dates = Counter(
-        item.destination.parent.parent.relative_to(output_root).as_posix() for item in items
+    group_folders = Counter(
+        item.row.get(
+            "StudyFolder",
+            item.destination.parent.parent.relative_to(output_root).as_posix()
+            if item.destination is not None
+            else "N/A",
+        )
+        for item in items
     )
     by_series = Counter(
-        item.destination.parent.relative_to(output_root).as_posix() for item in items
+        item.row.get(
+            "SeriesFolder",
+            item.destination.parent.relative_to(output_root).as_posix()
+            if item.destination is not None
+            else "N/A",
+        )
+        for item in items
+    )
+    study_count = len(
+        {
+            item.row.get("StudyInstanceUID")
+            for item in items
+            if item.row.get("StudyInstanceUID") and item.row.get("StudyInstanceUID") != "N/A"
+        }
     )
     rows = [item.row for item in items]
     csv_target_rows = metadata_rows(rows, profile_name)
@@ -2711,9 +2981,9 @@ def summarize_items(
         if count > 0:
             skipped_by_reason[reason] = count
 
-    return {
+    res: dict[str, Any] = {
         "candidate_files": stats["candidate_files"],
-        "organized_files": len(items),
+        "organized_files": 0 if list_only else len(items),
         "csv_target_files": csv_target_files,
         "csv_excluded_files": csv_excluded_files,
         "csv_excluded_non_image_files": csv_excluded_files,
@@ -2727,11 +2997,17 @@ def summarize_items(
         "duplicate_conflicts": stats.get("duplicate_conflicts", 0),
         "existing_output_conflicts": stats.get("existing_output_conflicts", 0),
         "status": status,
-        "device_dates": dict(sorted(device_dates.items())),
+        "group_folders": dict(sorted(group_folders.items())),
+        "study_count": study_count,
+        "device_dates": dict(sorted(group_folders.items())),
         "acquisition_dates": dict(sorted(by_date.items())),
         "output_root": str(output_root),
         "profile": profile_name,
     }
+    if list_only:
+        res["list_only"] = True
+        res["listed_files"] = len(items)
+    return res
 
 
 def planned_metadata_outputs(output_root: Path, items: list[OrganizedItem]) -> list[str]:
@@ -2842,6 +3118,21 @@ def run(
     # Check previous run
     previous_run_status, prev_warnings = check_previous_run(options.output_root)
     warnings_list = list(prev_warnings)
+    notices = patient_data_notices(options)
+
+    if options.patient_mode != "keep" and options.dicom_tags:
+        for tag_str in options.dicom_tags:
+            raw_tag = tag_str.split("=", 1)[-1].strip() if "=" in tag_str else tag_str.strip()
+            try:
+                parsed_tag = parse_dicom_tag(raw_tag)
+                kw = keyword_for_tag(parsed_tag) or raw_tag
+            except Exception:
+                kw = raw_tag
+            if kw in DIRECT_IDENTIFIER_TAGS or raw_tag in DIRECT_IDENTIFIER_TAGS:
+                warnings_list.append(
+                    f"Custom DICOM tag '{tag_str}' ({kw}) may contain direct patient identifiers "
+                    f"and will be written verbatim to metadata CSV files regardless of --patient-mode {options.patient_mode}."
+                )
 
     items, file_records, stats, excluded_dirs, limit_reached, cancelled = plan_organization(
         options, progress=progress, cancel_event=cancel_event
@@ -2861,6 +3152,8 @@ def run(
             file_records=file_records,
             warnings=warnings_list,
             previous_run_status=previous_run_status,
+            list_only=options.list_only,
+            privacy_notices=notices,
         )
 
     if options.dry_run:
@@ -2884,6 +3177,88 @@ def run(
             file_records=file_records,
             warnings=warnings_list,
             previous_run_status=previous_run_status,
+            list_only=options.list_only,
+            privacy_notices=notices,
+        )
+
+    if options.list_only:
+        if progress:
+            progress(ProgressEvent(stage="write", done=0, total=None, message="Writing reports..."))
+
+        options.output_root.mkdir(parents=True, exist_ok=True)
+        extra_cols = [spec.column for spec in parse_dicom_tag_specs(options.dicom_tags)]
+        all_rows = sorted(
+            [item.row for item in items],
+            key=lambda row: (
+                str(row.get("StudyFolder", "")),
+                str(row.get("SeriesNumber", "")),
+                str(row.get("SeriesFolder", "")),
+                int(row["InstanceNumber"])
+                if str(row.get("InstanceNumber", "")).isdigit()
+                else 0,
+                str(row.get("SourceFileName", "")),
+            ),
+        )
+        profile_rows = add_series_aggregates(metadata_rows(all_rows, options.profile))
+        write_csv(
+            options.output_root / "all_dicom_parameters.csv",
+            metadata_columns_for_profile(options.profile, profile_rows, extra_cols),
+            profile_rows,
+        )
+        write_csv(
+            options.output_root / "all_series_summary.csv",
+            summary_columns_for_profile(options.profile, profile_rows, extra_cols),
+            build_series_summary(profile_rows, options.profile, extra_cols),
+        )
+        write_file_report(options.output_root, options.input_root, file_records)
+        reports_list = [
+            "all_dicom_parameters.csv",
+            "all_series_summary.csv",
+            "file_report.csv",
+            "organize_summary.json",
+        ]
+        ended_at = datetime.now(timezone.utc).isoformat()
+        write_run_summary(
+            options.output_root,
+            items,
+            stats,
+            options,
+            started_at,
+            ended_at,
+            status="completed",
+            error=None,
+            planned_files=len(items),
+            not_processed_files=0,
+            excluded_directories=excluded_dirs,
+            limit_reached=limit_reached,
+            space_check_info=None,
+            previous_run_status=previous_run_status,
+            warnings_list=warnings_list,
+            reports=reports_list,
+        )
+        if progress:
+            progress(
+                ProgressEvent(
+                    stage="write",
+                    done=1,
+                    total=1,
+                    message="Reports written successfully",
+                )
+            )
+        return OrganizeResult(
+            items=items,
+            stats=stats,
+            output_root=options.output_root,
+            started_at=started_at,
+            ended_at=ended_at,
+            dry_run=False,
+            profile=options.profile,
+            status="completed",
+            file_records=file_records,
+            warnings=warnings_list,
+            previous_run_status=previous_run_status,
+            list_only=True,
+            privacy_notices=notices,
         )
 
     space_check_info = check_free_space(
@@ -3034,6 +3409,7 @@ def run(
             file_records=file_records,
             warnings=warnings_list,
             previous_run_status=previous_run_status,
+            privacy_notices=notices,
         )
 
     if progress:
@@ -3090,6 +3466,7 @@ def run(
         file_records=file_records,
         warnings=warnings_list,
         previous_run_status=previous_run_status,
+        privacy_notices=notices,
     )
 
 
@@ -3124,8 +3501,16 @@ def main() -> int:
         print(f"Failed while scanning: {exc}", file=sys.stderr)
         return 1
 
+    from dicom_organizer.messages import notice_text
+
     for warning in result.warnings:
         print(f"WARNING: {warning}", file=sys.stderr)
+
+    if result.dry_run:
+        for code in result.privacy_notices:
+            print(notice_text(code, "en"), file=sys.stderr)
+    elif not result.list_only and result.items:
+        print(notice_text("dicom_files_unchanged", "en"), file=sys.stderr)
 
     if result.status == "cancelled":
         print("Organization was cancelled.", file=sys.stderr)

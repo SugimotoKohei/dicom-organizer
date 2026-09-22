@@ -8,6 +8,13 @@ occur, but they should be documented here.
 
 ## 0.2.0 - Unreleased
 
+- Add `--list-only` mode to write metadata parameter tables and reports without copying or materializing DICOM files (defaulting to `<input>/organized_list`).
+- Add `StudyFolder` and `SeriesFolder` columns to both `dicom_parameters.csv` and `series_summary.csv`.
+- Add run-level `all_series_summary.csv` written directly under output root in both regular organization and list-only mode, concatenating all series summaries across studies and runs.
+- Add organization layout presets via `--layout`: `device-date` (default), `study` (`<StudyDate>_<StudyKey>`), and `patient-study` (`<PatientKey>/<StudyDate>_<StudyKey>`).
+- Enforce strict `--patient-mode drop` semantics: omit `PatientName`, `PatientID`, `PatientNameHash`, and `PatientIDHash` (all written as `N/A`, breaking change from previously retaining hash digests).
+- Add privacy notice system (`messages.py`, `patient_data_notices()`) with English and Japanese guidance on retained identifiers, recorded in `organize_summary.json` and printed on CLI execution.
+- Add warnings when direct patient identifier tags are specified via `--dicom-tag` under non-keep patient modes.
 - Add granular skip reason classification (`SKIP_REASONS`) and `classify_dicom_file` to distinguish non-DICOM files, DICOMDIR, missing required UIDs, read errors, permission errors, hidden files, and duplicates.
 - Restrict `skipped_non_dicom` count strictly to files with `not_dicom` reason (breaking change from previously counting all unreadable candidates).
 - Add `file_report.csv` output to root directory providing per-file tracking of source-to-destination mappings, status, reasons, and file hashes.

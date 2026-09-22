@@ -16,20 +16,28 @@ contact path and include no private data in the issue.
 
 ## Patient Data And PHI
 
-`dicom-organizer` is not a complete DICOM de-identification tool. It can reduce
-patient metadata written to its own CSV outputs with:
+`dicom-organizer` is designed for organizing local files and extracting acquisition parameters; it is **not** a DICOM de-identification or anonymization tool.
+
+When handling patient information:
+
+- **DICOM Files Are Not Anonymized**: Organizing DICOM files (via copy, link, or move) preserves the original DICOM headers completely. Patient identifiers remain inside the organized DICOM files.
+- **CSV & Report Privacy Modes (`--patient-mode`)**:
+  - `keep` (default): writes `PatientName` and `PatientID` verbatim to metadata CSVs.
+  - `hash`: writes 16-character SHA-256 digests. Note that this is pseudonymization, not anonymization, and can be susceptible to dictionary attacks; it is not suitable for public sharing.
+  - `drop`: strictly writes `N/A` for `PatientName`, `PatientID`, `PatientNameHash`, and `PatientIDHash`.
+- **Other Identifiers Retained**: Study dates, Study/Series/SOP UIDs, equipment details, and original relative file paths (`SourceFileName`) remain in CSVs and `file_report.csv`. If source directory or file names contain patient identifiers, they will appear in reports.
+- **Custom DICOM Tags**: If direct patient identifiers (e.g. `PatientBirthDate`, `AccessionNumber`) are specified via `--dicom-tag`, they are written verbatim regardless of `--patient-mode`.
+- **List-Only Mode (`--list-only`)**: Generates parameter tables and reports without copying or creating DICOM files.
+
+CLI usage examples:
 
 ```bash
-dicom-organizer --input /path/to/dicom-root --patient-mode hash
-dicom-organizer --input /path/to/dicom-root --patient-mode drop
+dicom-organizer /path/to/dicom-root --patient-mode hash
+dicom-organizer /path/to/dicom-root --patient-mode drop
+dicom-organizer /path/to/dicom-root --list-only
 ```
 
-The default is `--patient-mode keep`, which writes `PatientName` and
-`PatientID` into CSV outputs. This default exists for backward compatibility.
-
-The tool does not rewrite DICOM headers unless a file operation copies, links,
-or moves the source file. Before sharing any output, inspect the generated
-folders and CSV files with your institution's privacy requirements in mind.
+Before sharing any outputs outside your secure local environment, follow your institution's privacy regulations and use dedicated, validated DICOM de-identification tools to remove protected health information (PHI).
 
 ## Medical Use
 

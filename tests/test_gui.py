@@ -106,7 +106,7 @@ def test_g8_reason_explanations_accuracy() -> None:
     from dicom_organizer import i18n
 
     dup_help_ja = i18n.reason_help("duplicate_identical", "ja")
-    assert "SOPInstanceUID" in dup_help_ja and "2 件目以降はコピーしませんでした" in dup_help_ja
+    assert "SOPInstanceUID" in dup_help_ja and "最初に見つけた 1 件だけを対象にし" in dup_help_ja
 
     exist_help_ja = i18n.reason_help("existing_output", "ja")
     assert "同じ名前のファイルが既にあった" in exist_help_ja
@@ -1022,7 +1022,80 @@ def test_gui_smoke_test_cli(tmp_path: Path) -> None:
     assert res.returncode == 0, f"exit={res.returncode}\nstderr={res.stderr}"
     assert report_path.exists()
     content = report_path.read_text(encoding="utf-8")
+    assert content
     assert "[PASS]" in content
     assert "gui-smoke-test: 1/1 checks passed" in content
 
 
+def test_gui_real_run_status_and_resume_button_p1(tmp_path: Path) -> None:
+    """Verify real worker execution updates status label, hides resume button on success (P1)."""
+    import time
+    from PySide6.QtCore import QSettings
+    from dicom_organizer import gui, i18n
+    from dicom_organizer.sample_data import create_sample_dataset
+
+    app = _qt_app()
+    dataset = create_sample_dataset(tmp_path / "sample")
+    preview_status = i18n.tr("status_preview_completed", "ja")
+    expected = {
+        "preview": preview_status,
+        "list": i18n.tr("status_completed", "ja"),
+        "organize": i18n.tr("status_completed", "ja"),
+    }
+
+    for task, exp_text in expected.items():
+        settings = QSettings(str(tmp_path / f"settings_{task}.ini"), QSettings.Format.IniFormat)
+        window = gui.MainWindow(settings=settings, language="ja")
+        try:
+            window.select_task(task)
+            window.input_edit.setText(str(dataset.root))
+            window.output_edit.setText(str(tmp_path / f"out_{task}"))
+            window._on_run_clicked()
+
+            deadline = time.time() + 60
+            while window.is_running and time.time() < deadline:
+                app.processEvents()
+                time.sleep(0.01)
+            for _ in range(10):
+                app.processEvents()
+
+            assert not window.is_running, f"{task} did not finish"
+            assert window.stage_label.text() == exp_text
+            assert window.resume_button.isHidden()
+            assert window.progress_bar.maximum() > 0
+            assert window.progress_bar.value() == window.progress_bar.maximum()
+        finally:
+            window.close()
+
+
+def test_gui_empty_preview_progress_bar_p2(tmp_path: Path) -> None:
+    """Verify empty input folder preview still finalizes determinate progress bar (P2)."""
+    import time
+    from PySide6.QtCore import QSettings
+    from dicom_organizer import gui, i18n
+
+    app = _qt_app()
+    empty = tmp_path / "empty_dir"
+    empty.mkdir()
+    settings = QSettings(str(tmp_path / "settings_empty.ini"), QSettings.Format.IniFormat)
+    window = gui.MainWindow(settings=settings, language="ja")
+    try:
+        window.select_task("preview")
+        window.input_edit.setText(str(empty))
+        window.output_edit.setText(str(tmp_path / "out_empty"))
+        window._on_run_clicked()
+
+        deadline = time.time() + 60
+        while window.is_running and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        for _ in range(10):
+            app.processEvents()
+
+        assert not window.is_running
+        assert window.stage_label.text() == i18n.tr("status_preview_completed", "ja")
+        assert window.progress_bar.maximum() > 0
+        assert window.progress_bar.value() == window.progress_bar.maximum()
+        assert window.resume_button.isHidden()
+    finally:
+        window.close()

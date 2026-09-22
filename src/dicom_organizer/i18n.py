@@ -91,8 +91,15 @@ REASON_TEXTS: dict[str, dict[str, dict[str, str]]] = {
             "en": "Identical duplicate",
         },
         "help": {
-            "ja": "入力の中に、同じ SOPInstanceUID で内容も同じファイルが複数あったため、2 件目以降はコピーしませんでした。",
-            "en": "Multiple files with the same SOPInstanceUID and identical content were found in the input; duplicate copies were skipped.",
+            "ja": (
+                "入力の中に、同じ SOPInstanceUID で内容も同じファイルが複数ありました。最初に見つけた 1 件だけを対象にし、"
+                "残りは整理・一覧に含めていません（file_report.csv の DuplicateOf 列に元のファイルが出ます）。"
+            ),
+            "en": (
+                "Several files in the input have the same SOPInstanceUID and identical content. Only the first one found is "
+                "used; the other copies are not organized or listed (the DuplicateOf column in file_report.csv shows the "
+                "original)."
+            ),
         },
     },
     "existing_output": {
@@ -771,6 +778,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "ja": "完了しました",
         "en": "Completed",
     },
+    "status_preview_completed": {
+        "ja": "確認が完了しました（ファイルは書き込んでいません）",
+        "en": "Preview finished (no files were written)",
+    },
     "status_cancelled": {
         "ja": "中止しました",
         "en": "Cancelled",
@@ -880,8 +891,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "Excluded from table (non-image)",
     },
     "count_desc_csv_excluded": {
-        "ja": "整理の対象になったが、撮像条件の表には載せない DICOM オブジェクト（プレゼンテーションステート、構造化レポート、各社独自のオブジェクトなど）の数です。",
-        "en": "Number of DICOM objects organized but excluded from the parameter table (Presentation States, Structured Reports, proprietary objects, etc.).",
+        "ja": (
+            "見つかった DICOM のうち、撮像条件の表には載せないオブジェクト（プレゼンテーションステート、構造化レポート、"
+            "各社独自のオブジェクトなど）の数です。整理するときは、画像と同じようにフォルダへ配置します。"
+        ),
+        "en": (
+            "Number of DICOM objects found that are not included in the parameter table (Presentation States, Structured "
+            "Reports, proprietary objects, etc.). When organizing, they are placed in folders like images."
+        ),
     },
     "count_item_series": {
         "ja": "シリーズ数（非画像を含む）",
@@ -920,8 +937,14 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "UID conflicts (different content)",
     },
     "count_desc_duplicates": {
-        "ja": "同じ SOPInstanceUID を持ちながら内容が異なるファイルです（番号付きで両方整理されます）。",
-        "en": "Files sharing identical SOPInstanceUIDs but with differing content (both organized with suffixes).",
+        "ja": (
+            "同じ SOPInstanceUID を持ちながら内容が異なるファイルの数です。どちらも対象にし、整理するときは番号を付けた"
+            "別の名前で両方を配置します。"
+        ),
+        "en": (
+            "Number of files that share an SOPInstanceUID but have different content. Both are kept; when organizing, "
+            "both are placed under numbered names."
+        ),
     },
     "table_series_title_count": {
         "ja": "見つかったシリーズ（{count} 件）:",

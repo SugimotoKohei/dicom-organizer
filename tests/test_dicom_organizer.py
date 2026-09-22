@@ -2629,8 +2629,13 @@ def test_dicomdir_classification(tmp_path: Path) -> None:
     ds = pydicom.dcmread(img_path)
     ds.StudyID = "1"
     file_set = FileSet()
-    file_set.add(ds)
-    file_set.write(input_root / "disc")
+    try:
+        file_set.add(ds)
+        file_set.write(input_root / "disc")
+    finally:
+        # Clean up pydicom FileSet staging directory to prevent ResourceWarning.
+        if hasattr(file_set, "_stage") and "t" in file_set._stage:
+            file_set._stage["t"].cleanup()
 
     dicomdir_file = input_root / "disc" / "DICOMDIR"
     assert dicomdir_file.exists()

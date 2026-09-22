@@ -1475,15 +1475,31 @@ class MainWindow(QMainWindow):
         self.cancel_button.setEnabled(False)
         self._set_inputs_enabled(True)
 
+        is_preview = (self.current_task == "preview") or result.dry_run
+
         if result.status == "completed":
             self.stage_label.setText(i18n.tr("status_completed", self.language))
             self.resume_button.setVisible(False)
+        elif result.status == "dry_run":
+            self.stage_label.setText(i18n.tr("status_preview_completed", self.language))
+            self.resume_button.setVisible(False)
         elif result.status == "cancelled":
             self.stage_label.setText(i18n.tr("status_cancelled", self.language))
-            self.resume_button.setVisible(True)
+            self.resume_button.setVisible(not is_preview)
         else:
             self.stage_label.setText(i18n.tr("status_failed", self.language))
-            self.resume_button.setVisible(True)
+            self.resume_button.setVisible(not is_preview)
+
+        if result.status in ("completed", "dry_run"):
+            if self.progress_bar.maximum() <= 0:
+                self.progress_bar.setRange(0, 1)
+                self.progress_bar.setValue(1)
+            else:
+                self.progress_bar.setValue(self.progress_bar.maximum())
+        else:
+            if self.progress_bar.maximum() <= 0:
+                self.progress_bar.setRange(0, 1)
+                self.progress_bar.setValue(0)
 
         self.show_result(result)
         # Scroll down to reveal results (H2)
@@ -1494,8 +1510,13 @@ class MainWindow(QMainWindow):
         self.is_running = False
         self.run_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
-        self.resume_button.setVisible(True)
+        is_preview = self.current_task == "preview"
+        self.resume_button.setVisible(not is_preview)
         self._set_inputs_enabled(True)
+
+        if self.progress_bar.maximum() <= 0:
+            self.progress_bar.setRange(0, 1)
+            self.progress_bar.setValue(0)
 
         self.stage_label.setText(i18n.tr("status_failed", self.language))
 

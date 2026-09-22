@@ -8,6 +8,13 @@ occur, but they should be documented here.
 
 ## 0.2.0 - Unreleased
 
+- Add column dictionary and machine-readable schema (`src/dicom_organizer/columns.py`, `ColumnSpec`, `COLUMN_SPECS`, `column_spec()`, and `schema_document()`) defining meanings, units, sources, levels, missing (`N/A`) conditions, profile scopes, and `absent_value` for all 100 CSV columns.
+- Add `--print-schema` CLI option to export the schema document and column conventions as formatted JSON without requiring input directories.
+- Add `scripts/generate_column_docs.py` documentation generator with `--check` mode, creating `docs/csv-columns.md` in both English and Japanese.
+- Add links to `docs/csv-columns.md` in `docs/csv-schema.md`.
+- Strictly represent missing values as `N/A` in CSV tables: write `N/A` to `AcquisitionDate` when both `AcquisitionDate` and `StudyDate` are absent (folder names retain `unknown_date`), write `N/A` to `InstanceNumber` when absent from header (filename templates retain sequence counter), and set `EchoCount` and `CoilElementCount` to `N/A` rather than `0` when no target values exist.
+- Replace always-empty `ThermalIndex` column in US profile with three standard DICOM attributes: `SoftTissueThermalIndex (0018,5027)`, `BoneThermalIndex (0018,5024)`, and `CranialThermalIndex (0018,5026)`.
+- Restrict Siemens private metadata columns (`SiemensChannelMixing`, `SiemensCoilElement`, `SiemensIceDims`, `SiemensIceDimChannel`, `SiemensIceDimEcho`) to objects whose `Manufacturer` contains `siemens` (case-insensitive), outputting `N/A` otherwise.
 - Add Enhanced / multi-frame DICOM support: extract 13 key imaging parameters from Shared and Per-Frame Functional Groups when classic attributes are absent, preserve distinct frame-varying values with `|` delimiters in frame order, and add `NumberOfFrames` and `FrameVaryingAttributes` common columns to both `dicom_parameters.csv` and `series_summary.csv`.
 - Enhance multi-echo TE aggregation: split `TE_ms` values by `|` before counting unique echo times to correctly calculate `EchoCount` and `EchoTimes_ms` on Enhanced multi-echo series.
 - Add facility-wide TOML configuration file support via `--config PATH` and the `DICOM_ORGANIZER_CONFIG` environment variable, with strict schema/type validation, relative `output` path resolution against config directory, and CLI precedence merging.

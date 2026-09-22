@@ -244,7 +244,9 @@ US_METADATA_COLUMNS = [
     "TransducerData",
     "TransducerType",
     "MechanicalIndex",
-    "ThermalIndex",
+    "SoftTissueThermalIndex",
+    "BoneThermalIndex",
+    "CranialThermalIndex",
     "UltrasoundColorDataPresent",
 ]
 
@@ -607,6 +609,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pre_parser.add_argument("--self-test", action="store_true")
     pre_parser.add_argument("--self-test-report", type=Path)
     pre_parser.add_argument("--diagnostics", action="store_true")
+    pre_parser.add_argument("--print-schema", action="store_true")
     pre_args, _ = pre_parser.parse_known_args(argv)
 
     config_path_str = pre_args.config
@@ -636,6 +639,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--print-config",
         action="store_true",
         help="Print effective configuration in TOML format and exit.",
+    )
+    parser.add_argument(
+        "--print-schema",
+        action="store_true",
+        help="Print machine-readable column schema as JSON and exit.",
     )
     parser.add_argument(
         "--self-test",
@@ -827,7 +835,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     args.config_file = config_file_resolved
 
-    is_standalone_mode = bool(args.self_test or args.diagnostics or args.print_config)
+    is_standalone_mode = bool(
+        args.self_test or args.diagnostics or args.print_config or args.print_schema
+    )
     if not is_standalone_mode:
         if args.input is None and args.input_path is None:
             parser.error("the following arguments are required: INPUT (or --input)")
@@ -1933,12 +1943,22 @@ def file_context(
         ds_value(ds, "PatientID", default=""),
         patient_mode,
     )
-    siemens_ice_dims = tag_value(ds, 0x0021, 0x118E)
-    siemens_dim_channel, siemens_dim_echo = parse_siemens_ice_dims(siemens_ice_dims)
+    manufacturer = ds_value(ds, "Manufacturer")
+    is_siemens = "siemens" in manufacturer.casefold()
+    if is_siemens:
+        siemens_ice_dims = tag_value(ds, 0x0021, 0x118E)
+        siemens_dim_channel, siemens_dim_echo = parse_siemens_ice_dims(siemens_ice_dims)
+        siemens_channel_mixing = tag_value(ds, 0x0021, 0x1176)
+        siemens_coil_element = tag_value(ds, 0x0021, 0x114F)
+    else:
+        siemens_ice_dims = "N/A"
+        siemens_dim_channel = "N/A"
+        siemens_dim_echo = "N/A"
+        siemens_channel_mixing = "N/A"
+        siemens_coil_element = "N/A"
     series_description = ds_value(ds, "SeriesDescription")
     protocol_name = ds_value(ds, "ProtocolName")
     philips_image_type = image_type_parts(ds)
-    manufacturer = ds_value(ds, "Manufacturer")
     sequence_name = sequence_name_text(ds)
     modality = ds_value(ds, "Modality")
     scan_duration, scan_duration_source = scan_duration_fields(ds)
@@ -1956,11 +1976,11 @@ def file_context(
         "SeriesNumber": series_number(ds),
         "SeriesDescription": series_description,
         "FileCount": "N/A",
-        "InstanceNumber": str(inst),
+        "InstanceNumber": ds_value(ds, "InstanceNumber"),
         "AcquisitionDate": ds_value(
             ds,
             "AcquisitionDate",
-            default=ds_value(ds, "StudyDate", default="unknown_date"),
+            default=ds_value(ds, "StudyDate", default="N/A"),
         ),
         "AcquisitionTime": ds_value(ds, "AcquisitionTime"),
         "PatientName": patient_name,
@@ -2019,8 +2039,8 @@ def file_context(
         "PatientIDHash": patient_id_hash,
         "PatientNameHash": patient_hash,
         "SOPClassUID": ds_value(ds, "SOPClassUID"),
-        "SiemensChannelMixing": tag_value(ds, 0x0021, 0x1176),
-        "SiemensCoilElement": tag_value(ds, 0x0021, 0x114F),
+        "SiemensChannelMixing": siemens_channel_mixing,
+        "SiemensCoilElement": siemens_coil_element,
         "CoilElementCount": "N/A",
         "CoilElements": "N/A",
         "SiemensIceDims": siemens_ice_dims,
@@ -2035,7 +2055,9 @@ def file_context(
         "TransducerData": ds_value(ds, "TransducerData"),
         "TransducerType": ds_value(ds, "TransducerType"),
         "MechanicalIndex": ds_value(ds, "MechanicalIndex"),
-        "ThermalIndex": ds_value(ds, "ThermalIndex"),
+        "SoftTissueThermalIndex": ds_value(ds, "SoftTissueThermalIndex"),
+        "BoneThermalIndex": ds_value(ds, "BoneThermalIndex"),
+        "CranialThermalIndex": ds_value(ds, "CranialThermalIndex"),
         "UltrasoundColorDataPresent": ds_value(ds, "UltrasoundColorDataPresent"),
         "FrameTime_ms": ds_value(ds, "FrameTime"),
         "DistanceSourceToDetector_mm": ds_value(ds, "DistanceSourceToDetector"),
@@ -2085,7 +2107,11 @@ def file_context(
         "instance_number": str(inst),
         "instance_number_6": f"{inst:06d}",
         "echo_time_ms": safe_name(float_text(getattr(ds, "EchoTime", "NA"))),
-        "siemens_coil_element": safe_name(tag_value(ds, 0x0021, 0x114F)),
+        "siemens_coil_element": (
+            safe_name(siemens_coil_element, fallback="NA")
+            if is_siemens and siemens_coil_element != "N/A"
+            else "NA"
+        ),
         "is_philips": "philips" in manufacturer.casefold(),
         "is_philips_mr": "philips" in manufacturer.casefold() and modality == "MR",
         "modality": modality,
@@ -3137,9 +3163,9 @@ def add_series_aggregates(rows: list[dict[str, str]]) -> list[dict[str, str]]:
         is_mr = any(row_profile_name(row) == "mr" for row in series_rows)
         aggregates[series_key] = {
             "FileCount": str(len(series_rows)),
-            "EchoCount": str(len(echo_times)) if is_mr else "N/A",
+            "EchoCount": str(len(echo_times)) if is_mr and echo_times else "N/A",
             "EchoTimes_ms": "|".join(echo_times) if echo_times else "N/A",
-            "CoilElementCount": str(len(coil_elements)) if is_mr else "N/A",
+            "CoilElementCount": str(len(coil_elements)) if is_mr and coil_elements else "N/A",
             "CoilElements": "|".join(coil_elements) if coil_elements else "N/A",
         }
 
@@ -3948,6 +3974,12 @@ def main() -> int:
     if getattr(args, "print_config", False):
         effective = effective_config_from_args(args)
         sys.stdout.write(config_to_toml(effective))
+        return 0
+
+    if getattr(args, "print_schema", False):
+        from dicom_organizer.columns import schema_document
+
+        sys.stdout.write(json.dumps(schema_document(), indent=2, ensure_ascii=False) + "\n")
         return 0
 
     if getattr(args, "self_test", False):

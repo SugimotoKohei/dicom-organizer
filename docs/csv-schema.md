@@ -1,6 +1,6 @@
 # CSV Schema
 
-This document describes the CSV files written by `dicom-organizer`.
+This document describes the CSV files written by `dicom-organizer`. For the exhaustive column dictionary with units, sources, and missing value conditions, see [CSV Column Dictionary (csv-columns.md)](csv-columns.md).
 
 ## Files And Row Scope
 
@@ -190,7 +190,7 @@ Profile-specific columns are appended after the common columns.
   type, and Siemens channel helper fields.
 - `ct`: kVp, tube current, exposure time, convolution kernel, and reconstruction
   diameter.
-- `us`: transducer, mechanical/thermal index, and color data flag.
+- `us`: transducer, mechanical index, thermal indices (soft tissue, bone, cranial), and color data flag.
 - `xa`: kVp, tube current, exposure time, frame time, and source-detector/source-
   patient distances.
 - `pt`: radiopharmaceutical, dose, half-life, and decay correction.
@@ -359,7 +359,7 @@ The following columns prioritize classic top-level DICOM attributes; if absent o
 
 ## 日本語
 
-この文書は `dicom-organizer` が出力するCSVファイルの仕様です。
+この文書は `dicom-organizer` が出力するCSVファイルの仕様です。各列の意味、単位、取得元、N/A（欠損）条件の詳細な一覧は [CSV 列辞書 (csv-columns.md)](csv-columns.md) を参照してください。
 
 ## ファイルと行の単位
 
@@ -537,7 +537,7 @@ profile別の列は共通列の後ろに追加されます。
   parallel reduction factor、sampling、SAR、coil、MR acquisition type、Siemens
   channel補助列。
 - `ct`: kVp、tube current、exposure time、convolution kernel、reconstruction diameter。
-- `us`: transducer、mechanical/thermal index、color data flag。
+- `us`: transducer、mechanical index、サーマルインデックス（軟部組織・骨・頭蓋骨）、color data flag。
 - `xa`: kVp、tube current、exposure time、frame time、source-detector/source-patient距離。
 - `pt`: radiopharmaceutical、dose、half-life、decay correction。
 

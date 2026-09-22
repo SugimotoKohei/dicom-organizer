@@ -3780,7 +3780,8 @@ def test_diagnostics_lines_mask_home_exact_or_sep() -> None:
     child_home = home + os.sep + "my_config.toml"
     lines_child = diagnostics_lines(config_file=child_home)
     config_line_child = next(line for line in lines_child if line.startswith("config_file: "))
-    assert config_line_child == "config_file: ~/my_config.toml"
+    assert config_line_child == f"config_file: ~{os.sep}my_config.toml"
+
 
 
 def test_mixed_output_warning_on_older_schema_or_different_layout(tmp_path: Path) -> None:

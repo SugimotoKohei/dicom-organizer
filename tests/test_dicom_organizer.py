@@ -1629,6 +1629,14 @@ def test_cli_version_prints_package_version() -> None:
     assert result.stdout.strip().startswith("dicom-organizer ")
 
 
+def test_version_matches_pyproject() -> None:
+    import dicom_organizer
+
+    pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    assert dicom_organizer.__version__ == data["project"]["version"]
+
+
 def test_csv_formats_time_fields(tmp_path: Path) -> None:
     input_root = tmp_path / "input"
     output_root = tmp_path / "organized"

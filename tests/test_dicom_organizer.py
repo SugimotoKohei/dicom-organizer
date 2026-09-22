@@ -3773,3 +3773,111 @@ def test_diagnostics_lines_mask_home_exact_or_sep() -> None:
     lines_child = diagnostics_lines(config_file=child_home)
     config_line_child = next(line for line in lines_child if line.startswith("config_file: "))
     assert config_line_child == "config_file: ~/my_config.toml"
+
+
+def test_mixed_output_warning_on_older_schema_or_different_layout(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "test.dcm",
+        series_uid="1.2.3.4",
+        sop_uid="1.2.3.4.1",
+        series_number=1,
+        instance_number=1,
+    )
+    out = tmp_path / "out"
+    out.mkdir()
+
+    # 1. Old version lacking output_schema_version
+    (out / "organize_summary.json").write_text(
+        json.dumps({"status": "completed"}), encoding="utf-8"
+    )
+    result_old = run(
+        OrganizeOptions(
+            input_root=input_root,
+            output_root=out,
+            dry_run=True,
+            layout="device-date",
+            if_exists="skip",
+        )
+    )
+    assert any(
+        "0.1" in w or "older" in w.lower() or "schema" in w.lower()
+        for w in result_old.warnings
+    )
+
+    # 2. Different layout
+    (out / "organize_summary.json").write_text(
+        json.dumps({
+            "status": "completed",
+            "output_schema_version": 2,
+            "layout": "study",
+        }),
+        encoding="utf-8",
+    )
+    result_diff = run(
+        OrganizeOptions(
+            input_root=input_root,
+            output_root=out,
+            dry_run=True,
+            layout="device-date",
+            if_exists="skip",
+        )
+    )
+    assert any("layout" in w.lower() for w in result_diff.warnings)
+
+    # 3. Same version and layout produces no warning
+    (out / "organize_summary.json").write_text(
+        json.dumps({
+            "status": "completed",
+            "output_schema_version": 2,
+            "layout": "device-date",
+        }),
+        encoding="utf-8",
+    )
+    result_same = run(
+        OrganizeOptions(
+            input_root=input_root,
+            output_root=out,
+            dry_run=True,
+            layout="device-date",
+            if_exists="skip",
+        )
+    )
+    assert not [
+        w for w in result_same.warnings if "layout" in w.lower() or "older" in w.lower()
+    ]
+    assert result_same.previous_run_status is None
+
+
+def test_previous_run_status_completed_stays_none(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "test.dcm",
+        series_uid="1.2.3.4",
+        sop_uid="1.2.3.4.1",
+        series_number=1,
+        instance_number=1,
+    )
+    first = run(OrganizeOptions(input_root=input_root, output_root=output_root))
+    assert first.previous_run_status is None
+
+    second = run(
+        OrganizeOptions(
+            input_root=input_root,
+            output_root=output_root,
+            if_exists="skip",
+        )
+    )
+    assert second.previous_run_status is None
+    assert not [
+        w for w in second.warnings if "older" in w.lower() or "layout" in w.lower()
+    ]
+
+    summary = json.loads(
+        (output_root / "organize_summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["previous_run_status"] is None
+

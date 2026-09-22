@@ -19,13 +19,20 @@ maintainers = [
 keywords = [
     "dicom",
     "mri",
+    "ct",
     "medical-imaging",
+    "acquisition-parameters",
+    "protocol",
     "pydicom",
     "cli",
+    "gui",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
+    "Environment :: X11 Applications :: Qt",
+    "Environment :: MacOS X",
+    "Environment :: Win32 (MS Windows)",
     "Intended Audience :: Healthcare Industry",
     "Intended Audience :: Science/Research",
     "Operating System :: MacOS",
@@ -44,6 +51,8 @@ dependencies = [
 Homepage = "https://github.com/SugimotoKohei/dicom-organizer"
 Repository = "https://github.com/SugimotoKohei/dicom-organizer"
 Issues = "https://github.com/SugimotoKohei/dicom-organizer/issues"
+Discussions = "https://github.com/SugimotoKohei/dicom-organizer/discussions"
+Documentation = "https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/README.md"
 Changelog = "https://github.com/SugimotoKohei/dicom-organizer/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]

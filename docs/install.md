@@ -58,9 +58,14 @@ Formal code signing and notarization certificates have not yet been acquired (pl
     /Applications/dicom-organizer.app/Contents/MacOS/dicom-organizer --self-test --self-test-report ~/Desktop/dicom-organizer-self-test.txt
     ```
   - Windows:
-    ```cmd
-    dicom-organizer.exe --self-test --self-test-report %USERPROFILE%\Desktop\dicom-organizer-self-test.txt
-    ```
+    - **PowerShell** (Default terminal in Windows 11):
+      ```powershell
+      .\dicom-organizer.exe --self-test --self-test-report $env:USERPROFILE\Desktop\dicom-organizer-self-test.txt
+      ```
+    - **Command Prompt (cmd.exe)**:
+      ```cmd
+      dicom-organizer.exe --self-test --self-test-report %USERPROFILE%\Desktop\dicom-organizer-self-test.txt
+      ```
     (Note: On Windows, the windowed executable may not output directly to the console; open the generated report file to confirm all checks display `[PASS]`.)
 
 #### Offline Environments
@@ -181,9 +186,14 @@ uv tool install --no-index --find-links ./wheelhouse 'dicom-organizer[gui]'
     /Applications/dicom-organizer.app/Contents/MacOS/dicom-organizer --self-test --self-test-report ~/Desktop/dicom-organizer-self-test.txt
     ```
   - Windows:
-    ```cmd
-    dicom-organizer.exe --self-test --self-test-report %USERPROFILE%\Desktop\dicom-organizer-self-test.txt
-    ```
+    - **PowerShell**（Windows 11 の既定ターミナル）:
+      ```powershell
+      .\dicom-organizer.exe --self-test --self-test-report $env:USERPROFILE\Desktop\dicom-organizer-self-test.txt
+      ```
+    - **コマンドプロンプト (cmd.exe)**:
+      ```cmd
+      dicom-organizer.exe --self-test --self-test-report %USERPROFILE%\Desktop\dicom-organizer-self-test.txt
+      ```
     ※ Windows のアプリ版はコンソールに直接結果が出力されないことがあるため、生成されたレポートファイルを開いてすべての項目が `[PASS]` となっていることを確認してください。
 
 #### オフライン環境への持ち込み

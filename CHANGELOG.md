@@ -8,6 +8,22 @@ occur, but they should be documented here.
 
 ## 0.2.0 - Unreleased
 
+- Add bilingual documentation suite across `docs/` and repository root:
+  - `README.md`: value-oriented overview with before-after comparisons, GIF demo, quickstart guides, output explanations, and privacy warnings.
+  - `SUPPORT.md` & `GOVERNANCE.md`: clear support routing (FAQ -> docs -> Discussions -> email `sugimotokouhei@gmail.com`), PHI submission warnings, project governance, and maintainer roadmap.
+  - `SECURITY.md` & `CONTRIBUTING.md`: updated vulnerability disclosure contact and developer guidance including GUI testing prerequisites.
+  - `docs/usage.md`: full CLI usage guide migrated from original README plus advanced options (`--list-only`, `--layout`, `--config`, `--checksum`, `--diagnostics`, `--self-test`).
+  - `docs/positioning.md`: target user personas, definition of default adoption, success metrics, and out-of-scope boundaries.
+  - `docs/support-matrix.md`: multi-tiered DICOM capability matrix grounded in explicit test assertions and real-scanner multi-vendor validation.
+  - `docs/validation.md`: automated CI test matrix across 3 OSes, real-world scanner verification table across 5 MRI models, and unverified boundary disclosures.
+  - `docs/performance.md`: benchmark methodology, memory scaling analysis, and throughput figures traced directly to empirical benchmark facts.
+  - `docs/privacy.md`: privacy analysis across `keep`, `hash`, and `drop` modes, retained identifiers, and DICOM PS3.15 Annex E anonymization guidance.
+  - `docs/deployment-guide.md`: one-page institutional IT guide covering permissions, zero network communication, security boundary checklist, and unattended verification.
+  - `docs/stability.md`: versioning compatibility guarantees, schema deprecation rules, and empirical criteria for Alpha -> Beta -> Stable progression.
+  - `docs/upgrade-guide.md` & `docs/faq.md`: 0.1.x to 0.2.0 upgrade guidance and troubleshooting for common user questions and platform quirks.
+  - `docs/workflows/`: six downstream integration guides covering cross-scanner protocol comparison, 3D Slicer import, dcm2niix conversion, research sharing, Orthanc upload, and repeated data ingestion.
+  - `docs/research/`: user research plan and interview record templates for empirical adoption validation.
+  - `.github/`: structured issue templates (`bug_report.yml`, `verification_report.yml`, `feature_request.yml`), template config with contact routes, and pull request template.
 - Support running CLI via `python -m dicom_organizer` and `python -m dicom_organizer.cli` (`src/dicom_organizer/__main__.py`).
 - Add DICOM support verification suite (`tests/test_support_matrix.py`) covering compressed transfer syntaxes (JPEG Baseline and JPEG 2000 Lossless with SHA-256 byte preservation), character sets (UTF-8 `ISO_IR 192` and Japanese `ISO 2022 IR 87` with `safe_name()` folder verification), non-image objects (Basic Text SR and RTSTRUCT verified via `file_report.csv`), preamble-less streams under force-read, DICOMDIR handling via `pydicom.fileset.FileSet`, Enhanced MR functional groups, and vendor private tag fallbacks.
 - Add multi-mode performance benchmark tool (`scripts/benchmark.py`) measuring throughput (files/s) and peak RSS memory via `os.wait4` across dry-run, list-only, copy, and copy+checksum modes with Markdown and JSON exports.

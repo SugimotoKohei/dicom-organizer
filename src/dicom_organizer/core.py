@@ -2528,22 +2528,42 @@ def collect_reports(output_root: Path, items: list[OrganizedItem]) -> list[str]:
     return reports
 
 
-def check_previous_run(output_root: Path) -> tuple[str | None, list[str]]:
+def check_previous_run(
+    output_root: Path,
+    layout: str | None = None,
+) -> tuple[str | None, list[str]]:
     summary_path = output_root / "organize_summary.json"
     if not summary_path.exists():
         return None, []
+    warnings_list: list[str] = []
+    prev_status: str | None = None
     try:
         data = json.loads(summary_path.read_text(encoding="utf-8"))
-        prev_status = data.get("status")
-        if prev_status in ("running", "cancelled", "interrupted", "failed"):
-            warning = (
+        raw_status = data.get("status")
+        if raw_status in ("running", "cancelled", "interrupted", "failed"):
+            prev_status = raw_status
+            warnings_list.append(
                 f"Previous run was not completed (status={prev_status}). "
                 "Re-run with --if-exists skip to continue into an existing output folder."
             )
-            return prev_status, [warning]
+        prev_schema = data.get("output_schema_version")
+        if prev_schema is None:
+            warnings_list.append(
+                "This output folder was created by an older version (0.1.x) with a different folder layout. "
+                "Organizing into this folder will duplicate files under the new structure, and the series summary "
+                "table will list both old and new series. Please use a new, empty output folder."
+            )
+        elif layout is not None:
+            prev_layout = data.get("layout")
+            if prev_layout and prev_layout != layout:
+                warnings_list.append(
+                    f"This output folder was created with layout '{prev_layout}', which differs from the "
+                    f"current layout '{layout}'. Organizing into this folder will mix different folder structures. "
+                    "Please use a new, empty output folder."
+                )
     except Exception:
         pass
-    return None, []
+    return prev_status, warnings_list
 
 
 def find_existing_ancestor(path: Path) -> Path:
@@ -3533,7 +3553,9 @@ def run(
     started_at = datetime.now(timezone.utc).isoformat()
 
     # Check previous run
-    previous_run_status, prev_warnings = check_previous_run(options.output_root)
+    previous_run_status, prev_warnings = check_previous_run(
+        options.output_root, layout=options.layout
+    )
     warnings_list = list(prev_warnings)
     notices = patient_data_notices(options)
 

@@ -46,22 +46,52 @@ jobs:
           name: python-distributions
           path: dist/*
 
+  standalone:
+    name: Build standalone executables
+    uses: ./.github/workflows/standalone.yml
+    secrets: inherit
+
   github-release:
     name: Create GitHub release
-    needs: build
+    needs: [build, standalone]
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download distributions
+      - name: Download python distributions
         uses: actions/download-artifact@v8
         with:
           name: python-distributions
           path: dist
 
+      - name: Download standalone distributions
+        uses: actions/download-artifact@v8
+        with:
+          pattern: standalone-*
+          path: dist/standalone
+
+      - name: Aggregate release assets and SHA256SUMS
+        shell: bash
+        run: |
+          if [ -d dist/standalone ]; then
+            find dist/standalone -name "SHA256SUMS.txt" -exec cat {} + > dist/SHA256SUMS.txt
+            find dist/standalone -name "*.zip" -exec mv {} dist/ \;
+            zip_count=$(find dist -maxdepth 1 -name "*.zip" | wc -l)
+            sum_count=$(grep -v '^[[:space:]]*$' dist/SHA256SUMS.txt | wc -l)
+            echo "Found $zip_count zip files and $sum_count checksum entries."
+            if [ "$zip_count" -eq 0 ] || [ "$zip_count" -ne "$sum_count" ]; then
+              echo "Mismatch between zip file count ($zip_count) and SHA256SUMS entry count ($sum_count)!" >&2
+              exit 1
+            fi
+          fi
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v3
         with:
-          files: dist/*
+          files: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS.txt
           generate_release_notes: true
 
   pypi-publish:

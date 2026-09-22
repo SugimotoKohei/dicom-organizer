@@ -15,7 +15,20 @@ import dicom_organizer.core as core
 from dicom_organizer import columns, i18n, messages
 
 try:
-    from PySide6.QtCore import QEvent, QLocale, QObject, QPoint, QSettings, QSize, Qt, QThread, QUrl, Signal
+    from PySide6.QtCore import (
+        QEvent,
+        QEventLoop,
+        QLocale,
+        QObject,
+        QPoint,
+        QSettings,
+        QSize,
+        Qt,
+        QThread,
+        QTimer,
+        QUrl,
+        Signal,
+    )
     from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QKeySequence, QPaintEvent, QPalette, QShortcut
     from PySide6.QtWidgets import (
         QApplication,
@@ -62,6 +75,7 @@ except ImportError as exc:
             return self
 
     QEvent = _MissingQt
+    QEventLoop = _MissingQt
     QLocale = _MissingQt
     QObject = _MissingQt
     QPoint = _MissingQt
@@ -69,6 +83,7 @@ except ImportError as exc:
     QSize = _MissingQt
     Qt = _MissingQt
     QThread = _MissingQt
+    QTimer = _MissingQt
     QUrl = _MissingQt
     Signal = _MissingQt
     QAction = _MissingQt
@@ -2087,6 +2102,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--self-test-report", type=Path)
     parser.add_argument("--diagnostics", action="store_true")
+    parser.add_argument("--gui-smoke-test", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--gui-smoke-test-report", type=Path, help=argparse.SUPPRESS)
     args, _ = parser.parse_known_args(argv)
 
     if args.help:
@@ -2115,6 +2132,98 @@ def main(argv: list[str] | None = None) -> int:
         for line in core.diagnostics_lines():
             print(line)
         return 0
+
+    if args.gui_smoke_test:
+        if PYSIDE_IMPORT_ERROR is not None:
+            print(f"PySide6 import error: {PYSIDE_IMPORT_ERROR}", file=sys.stderr)
+            return 2
+
+        existing_app = QApplication.instance() is not None
+        app = QApplication.instance() or QApplication([sys.argv[0]] + argv)
+        window = MainWindow()
+        window.show()
+
+        sample_dir = window.use_sample_data(switch_to_list=True)
+
+        loop = QEventLoop()
+        success = [False]
+        error_msg = [""]
+
+        def on_finished(result: core.OrganizeResult) -> None:
+            success[0] = True
+            loop.quit()
+
+        def on_failed(exc_type: str, message: str, details: str) -> None:
+            success[0] = False
+            error_msg[0] = f"{exc_type}: {message}\n{details}"
+            loop.quit()
+
+        window.start_run()
+        if hasattr(window, "worker") and window.worker is not None:
+            window.worker.finished_signal.connect(on_finished)
+            window.worker.failed_signal.connect(on_failed)
+        else:
+            success[0] = False
+            error_msg[0] = "Worker not initialized"
+
+        if window.is_running:
+            timeout_timer = QTimer()
+            timeout_timer.setSingleShot(True)
+
+            def on_timeout() -> None:
+                error_msg[0] = "GUI smoke test timed out (120s watchdog)"
+                window.request_cancel()
+                loop.quit()
+
+            timeout_timer.timeout.connect(on_timeout)
+            timeout_timer.start(120000)
+
+            loop.exec()
+            timeout_timer.stop()
+        else:
+            if window.last_result is not None:
+                success[0] = True
+
+        if hasattr(window, "thread"):
+            if window.thread.isRunning():
+                window.thread.quit()
+                window.thread.wait(5000)
+            app.processEvents()
+
+        report_lines = [
+            f"[{'PASS' if success[0] else 'FAIL'}] GUI smoke test: list task with sample data",
+        ]
+        if error_msg[0]:
+            report_lines.append(f"       error: {error_msg[0]}")
+        if hasattr(window, "last_result") and window.last_result is not None:
+            summary = window.last_result.summary
+            report_lines.append(f"       status: {summary.get('status')}")
+            report_lines.append(f"       target_files: {summary.get('csv_target_files', 0)}")
+            report_lines.append(f"       series_count: {summary.get('series_count', 0)}")
+        summary_line = f"gui-smoke-test: {'1/1' if success[0] else '0/1'} checks passed"
+        report_lines.append(summary_line)
+        report_text = "\n".join(report_lines) + "\n"
+
+        if args.gui_smoke_test_report:
+            report_path = Path(args.gui_smoke_test_report)
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(report_text, encoding="utf-8")
+
+        print(report_text.strip())
+        window.close()
+        app.processEvents()
+        if not existing_app:
+            app.quit()
+
+        try:
+            import shutil
+
+            if sample_dir.exists():
+                shutil.rmtree(sample_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+        return 0 if success[0] else 1
 
     if PYSIDE_IMPORT_ERROR is not None:
         print(

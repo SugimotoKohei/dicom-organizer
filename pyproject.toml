@@ -56,6 +56,9 @@ dev = [
     "pytest>=9.0.3",
     "ruff>=0.15.13",
 ]
+build = [
+    "pyinstaller>=6.22",
+]
 
 [project.scripts]
 dicom-organizer = "dicom_organizer.cli:main"

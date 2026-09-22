@@ -999,3 +999,30 @@ def test_k1_secondary_text_contrast_and_palette_change(tmp_path: Path) -> None:
     finally:
         app.setPalette(orig_palette)
 
+
+def test_gui_smoke_test_cli(tmp_path: Path) -> None:
+    """Verify --gui-smoke-test and --gui-smoke-test-report via CLI execution."""
+    import subprocess
+    import sys
+
+    report_path = tmp_path / "gui_smoke_report.txt"
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+    res = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from dicom_organizer.gui import main; "
+            f"sys.exit(main(['--gui-smoke-test', '--gui-smoke-test-report', {str(report_path)!r}]))",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+    )
+    assert res.returncode == 0, f"exit={res.returncode}\nstderr={res.stderr}"
+    assert report_path.exists()
+    content = report_path.read_text(encoding="utf-8")
+    assert "[PASS]" in content
+    assert "gui-smoke-test: 1/1 checks passed" in content
+
+

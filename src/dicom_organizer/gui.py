@@ -77,7 +77,14 @@ try:
 except ImportError as exc:
     PYSIDE_IMPORT_ERROR: ImportError | None = exc
 
-    class _MissingQt:
+    class _MissingQtMeta(type):
+        def __getattr__(cls, name: str) -> Any:
+            return cls
+
+        def __getitem__(cls, item: Any) -> Any:
+            return cls
+
+    class _MissingQt(metaclass=_MissingQtMeta):
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
@@ -85,6 +92,9 @@ except ImportError as exc:
             return self
 
         def __getattr__(self, name: str) -> "_MissingQt":
+            return self
+
+        def __getitem__(self, item: Any) -> "_MissingQt":
             return self
 
     QEvent = _MissingQt
@@ -182,11 +192,15 @@ def blend_colors(fg: QColor, bg: QColor, fg_ratio: float) -> QColor:
 
 def compute_secondary_text_color(
     palette: QPalette,
-    fg_role: QPalette.ColorRole = QPalette.ColorRole.WindowText,
-    bg_role: QPalette.ColorRole | QColor = QPalette.ColorRole.Window,
+    fg_role: QPalette.ColorRole | None = None,
+    bg_role: QPalette.ColorRole | QColor | None = None,
     min_contrast: float = 4.8,
 ) -> QColor:
     """Compute secondary text color by blending fg and bg, ensuring contrast >= min_contrast."""
+    if fg_role is None:
+        fg_role = QPalette.ColorRole.WindowText
+    if bg_role is None:
+        bg_role = QPalette.ColorRole.Window
     fg = palette.color(fg_role)
     if isinstance(bg_role, QColor):
         bg = bg_role

@@ -1069,6 +1069,7 @@ def test_k1_secondary_text_contrast_and_palette_change(tmp_path: Path) -> None:
 
 def test_gui_smoke_test_cli(tmp_path: Path) -> None:
     """Verify --gui-smoke-test and --gui-smoke-test-report via CLI execution."""
+    _qt_app()
     import subprocess
     import sys
 
@@ -1096,12 +1097,14 @@ def test_gui_smoke_test_cli(tmp_path: Path) -> None:
 
 def test_gui_real_run_status_and_resume_button_p1(tmp_path: Path) -> None:
     """Verify real worker execution updates status label, hides resume button on success (P1)."""
+    app = _qt_app()
     import time
+
     from PySide6.QtCore import QSettings
+
     from dicom_organizer import gui, i18n
     from dicom_organizer.sample_data import create_sample_dataset
 
-    app = _qt_app()
     dataset = create_sample_dataset(tmp_path / "sample")
     preview_status = i18n.tr("status_preview_completed", "ja")
     expected = {
@@ -1137,11 +1140,13 @@ def test_gui_real_run_status_and_resume_button_p1(tmp_path: Path) -> None:
 
 def test_gui_empty_preview_progress_bar_p2(tmp_path: Path) -> None:
     """Verify empty input folder preview still finalizes determinate progress bar (P2)."""
+    app = _qt_app()
     import time
+
     from PySide6.QtCore import QSettings
+
     from dicom_organizer import gui, i18n
 
-    app = _qt_app()
     empty = tmp_path / "empty_dir"
     empty.mkdir()
     settings = QSettings(str(tmp_path / "settings_empty.ini"), QSettings.Format.IniFormat)

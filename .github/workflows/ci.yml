@@ -175,3 +175,40 @@ jobs:
           .venv/bin/dicom-organizer --self-test
           .venv/bin/dicom-organizer-gui --self-test
 
+  test-cli-only:
+    name: ubuntu-latest / CLI only (no GUI extras)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies (CLI only)
+        run: uv sync --locked
+
+      - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: uv run python -m pytest -q
+
+      - name: Run ruff
+        run: uv run ruff check
+
+      - name: CLI self-test and smoke tests
+        run: |
+          uv run dicom-organizer --version
+          uv run dicom-organizer --self-test
+          uv run dicom-organizer-gui --help
+          uv run dicom-organizer-gui --version
+          uv run dicom-organizer-gui --self-test
+
+

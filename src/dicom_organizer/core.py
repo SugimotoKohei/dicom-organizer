@@ -25,16 +25,19 @@ import importlib.metadata
 import json
 import math
 import os
+import platform
 import re
 import shutil
 import sys
+import threading
 import uuid
+import warnings
 from collections import Counter, defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pydicom
 from pydicom.datadict import keyword_for_tag, tag_for_keyword
@@ -54,6 +57,78 @@ from pydicom.uid import (
 )
 
 __version__ = "0.2.0"
+OUTPUT_SCHEMA_VERSION = 2
+
+SKIP_REASONS = (
+    "not_dicom",
+    "dicomdir",
+    "missing_required_uid",
+    "read_error",
+    "permission_denied",
+    "io_error",
+    "excluded_hidden",
+    "duplicate_identical",
+    "existing_output",
+)
+
+FILE_REPORT_COLUMNS = [
+    "SourceFileName",
+    "Status",
+    "Reason",
+    "Detail",
+    "OrganizedFileName",
+    "DuplicateOf",
+    "SOPInstanceUID",
+    "SeriesUID",
+    "Modality",
+    "SizeBytes",
+    "SHA256",
+]
+
+
+class InsufficientSpaceError(OSError):
+    """Raised when destination has insufficient disk space."""
+
+
+class IntegrityError(RuntimeError):
+    """Raised when file integrity check fails after organization."""
+
+
+@dataclass(frozen=True)
+class HeaderReadResult:
+    dataset: pydicom.dataset.Dataset | None
+    reason: str
+    detail: str
+
+
+@dataclass
+class FileRecord:
+    source: Path
+    status: str
+    reason: str = "N/A"
+    detail: str = "N/A"
+    destination: Path | None = None
+    duplicate_of: Path | None = None
+    sop_instance_uid: str = "N/A"
+    series_uid: str = "N/A"
+    modality: str = "N/A"
+    size_bytes: int | None = None
+    sha256: str = "N/A"
+
+
+@dataclass
+class _SopTracker:
+    first_source: Path
+    first_record: FileRecord
+    hashes: dict[str, Path] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ProgressEvent:
+    stage: str
+    done: int
+    total: int | None
+    message: str = ""
 
 
 def package_version() -> str:
@@ -288,6 +363,8 @@ class OrganizeOptions:
     patient_mode: str = "keep"
     dicom_tags: tuple[str, ...] = ()
     verbose: bool = False
+    checksum: bool = False
+    space_check: bool = True
 
 
 @dataclass(frozen=True)
@@ -361,10 +438,20 @@ class OrganizeResult:
     ended_at: str
     dry_run: bool
     profile: str
+    status: str = "completed"
+    file_records: list[FileRecord] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    previous_run_status: str | None = None
 
     @property
     def summary(self) -> dict[str, Any]:
-        return summarize_items(self.items, self.stats, self.output_root, self.profile)
+        return summarize_items(
+            self.items,
+            self.stats,
+            self.output_root,
+            self.profile,
+            status=self.status,
+        )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -504,6 +591,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Print skipped files and per-series output while running.",
     )
+    parser.add_argument(
+        "--checksum",
+        action="store_true",
+        default=False,
+        help="Verify SHA-256 checksum during file materialization.",
+    )
+    parser.add_argument(
+        "--no-space-check",
+        dest="space_check",
+        action="store_false",
+        default=True,
+        help="Disable free disk space pre-check.",
+    )
+    parser.add_argument(
+        "--no-progress",
+        dest="progress",
+        action="store_false",
+        default=True,
+        help="Disable console progress display.",
+    )
     args = parser.parse_args(argv)
     if args.input is None and args.input_path is None:
         parser.error("the following arguments are required: INPUT (or --input)")
@@ -561,6 +668,8 @@ def normalize_options(
             patient_mode=str(getattr(args, "patient_mode", "keep")),
             dicom_tags=tuple(str(tag) for tag in getattr(args, "dicom_tags", ()) or ()),
             verbose=bool(getattr(args, "verbose", False)),
+            checksum=bool(getattr(args, "checksum", False)),
+            space_check=bool(getattr(args, "space_check", True)),
         )
 
     if validate:
@@ -1484,22 +1593,30 @@ def should_skip(path: Path, input_root: Path, output_root: Path, options: Organi
     return False
 
 
-def iter_candidate_files(input_root: Path, output_root: Path, options: OrganizeOptions):
-    for root, dirnames, filenames in os.walk(input_root):
-        root_path = Path(root)
-        kept_dirnames = []
-        for dirname in sorted(dirnames):
-            dir_path = root_path / dirname
-            if should_prune_dir(dir_path, input_root, output_root, options):
-                continue
-            kept_dirnames.append(dirname)
-        dirnames[:] = kept_dirnames
+def classify_prune_dir(
+    dir_path: Path,
+    input_root: Path,
+    output_root: Path,
+    options: OrganizeOptions,
+) -> str | None:
+    try:
+        dir_path.relative_to(output_root)
+        return "output_root"
+    except ValueError:
+        pass
+    resolved_dir = dir_path.resolve()
+    resolved_out = output_root.resolve()
+    if resolved_dir == resolved_out or (
+        resolved_out.exists() and resolved_dir.is_relative_to(resolved_out)
+    ):
+        return "output_root"
 
-        for filename in sorted(filenames):
-            path = root_path / filename
-            if should_skip(path, input_root, output_root, options):
-                continue
-            yield path
+    rel_parts = dir_path.relative_to(input_root).parts
+    if not options.include_hidden and any(part.startswith(".") for part in rel_parts):
+        return "hidden"
+    if not options.include_organized and any(is_organized_dir_name(part) for part in rel_parts):
+        return "organized"
+    return None
 
 
 def should_prune_dir(
@@ -1508,28 +1625,144 @@ def should_prune_dir(
     output_root: Path,
     options: OrganizeOptions,
 ) -> bool:
-    try:
-        path.relative_to(output_root)
-        return True
-    except ValueError:
-        pass
+    return classify_prune_dir(path, input_root, output_root, options) is not None
 
-    rel_parts = path.relative_to(input_root).parts
-    if not options.include_hidden and any(part.startswith(".") for part in rel_parts):
-        return True
-    if not options.include_organized and any(is_organized_dir_name(part) for part in rel_parts):
-        return True
-    return False
+
+def scan_candidates(
+    input_root: Path,
+    output_root: Path,
+    options: OrganizeOptions,
+    cancel_event: threading.Event | None = None,
+) -> tuple[list[Path], list[Path], list[dict[str, str]]]:
+    """Scan input_root for DICOM candidate files, hidden files, and excluded directories."""
+    candidates: list[Path] = []
+    hidden_files: list[Path] = []
+    excluded_dirs: list[dict[str, str]] = []
+    resolved_out = output_root.resolve()
+
+    for root, dirnames, filenames in os.walk(input_root):
+        if cancel_event is not None and cancel_event.is_set():
+            break
+        root_path = Path(root)
+        kept_dirnames = []
+        for dirname in sorted(dirnames):
+            dir_path = root_path / dirname
+            prune_reason = classify_prune_dir(dir_path, input_root, output_root, options)
+            if prune_reason is not None:
+                excluded_dirs.append({
+                    "path": dir_path.relative_to(input_root).as_posix(),
+                    "reason": prune_reason,
+                })
+                continue
+            kept_dirnames.append(dirname)
+        dirnames[:] = kept_dirnames
+
+        for filename in sorted(filenames):
+            if cancel_event is not None and cancel_event.is_set():
+                break
+            path = root_path / filename
+
+            # Check if within output_root
+            is_out = False
+            try:
+                path.relative_to(output_root)
+                is_out = True
+            except ValueError:
+                if path.is_symlink():
+                    resolved_f = path.resolve()
+                    if resolved_out.exists() and resolved_f.is_relative_to(resolved_out):
+                        is_out = True
+            if is_out:
+                continue
+
+            rel_parts = path.relative_to(input_root).parts
+            if not options.include_organized and any(is_organized_dir_name(p) for p in rel_parts):
+                continue
+
+            if not options.include_hidden and any(part.startswith(".") for part in rel_parts):
+                if filename.startswith("."):
+                    hidden_files.append(path)
+                continue
+
+            candidates.append(path)
+
+    return candidates, hidden_files, excluded_dirs
+
+
+def iter_candidate_files(input_root: Path, output_root: Path, options: OrganizeOptions):
+    candidates, _hidden, _dirs = scan_candidates(input_root, output_root, options)
+    yield from candidates
+
+
+def classify_dicom_file(path: Path, force: bool) -> HeaderReadResult:
+    # 1. Read first 132 bytes to check DICM prefix
+    has_dicm = False
+    try:
+        with path.open("rb") as f:
+            header = f.read(132)
+            has_dicm = len(header) >= 132 and header[128:132] == b"DICM"
+    except PermissionError as exc:
+        return HeaderReadResult(None, "permission_denied", str(exc))
+    except OSError as exc:
+        return HeaderReadResult(None, "io_error", str(exc))
+
+    # 2. Read with pydicom
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ds = pydicom.dcmread(str(path), stop_before_pixels=True, force=force)
+    except PermissionError as exc:
+        return HeaderReadResult(None, "permission_denied", str(exc))
+    except OSError as exc:
+        return HeaderReadResult(None, "io_error", str(exc))
+    except pydicom.errors.InvalidDicomError as exc:
+        reason = "read_error" if has_dicm else "not_dicom"
+        return HeaderReadResult(None, reason, str(exc))
+    except Exception as exc:
+        reason = "read_error" if has_dicm else "not_dicom"
+        return HeaderReadResult(None, reason, str(exc))
+
+    # 3. Check for DICOMDIR
+    file_meta = getattr(ds, "file_meta", None)
+    sop_class = getattr(file_meta, "MediaStorageSOPClassUID", None) if file_meta else None
+    if (
+        str(sop_class) == "1.2.840.10008.1.3.10"
+        or str(getattr(ds, "SOPClassUID", None)) == "1.2.840.10008.1.3.10"
+    ):
+        return HeaderReadResult(None, "dicomdir", "DICOMDIR media storage directory")
+
+    # 4. Check for SeriesInstanceUID and SOPInstanceUID
+    has_series = hasattr(ds, "SeriesInstanceUID") and str(ds.SeriesInstanceUID).strip() != ""
+    has_sop = hasattr(ds, "SOPInstanceUID") and str(ds.SOPInstanceUID).strip() != ""
+    if has_series and has_sop:
+        return HeaderReadResult(ds, "N/A", "N/A")
+
+    # 5. Check if has_dicm but no transfer syntax or empty dataset
+    has_ts = file_meta is not None and getattr(file_meta, "TransferSyntaxUID", None) is not None
+    if has_dicm and (not has_ts or len(ds) == 0):
+        return HeaderReadResult(
+            None, "read_error", "DICM prefix found but no data elements could be read"
+        )
+
+    # 6. Check if has_dicm or SOPClassUID / Modality / StudyInstanceUID
+    has_marker = any(
+        hasattr(ds, attr) and str(getattr(ds, attr)).strip() != ""
+        for attr in ("SOPClassUID", "Modality", "StudyInstanceUID")
+    )
+    if has_dicm or has_marker:
+        missing = []
+        if not has_series:
+            missing.append("SeriesInstanceUID")
+        if not has_sop:
+            missing.append("SOPInstanceUID")
+        return HeaderReadResult(None, "missing_required_uid", f"missing {' and '.join(missing)}")
+
+    # 7. Otherwise not_dicom
+    return HeaderReadResult(None, "not_dicom", "not a DICOM file")
 
 
 def read_dicom_header(path: Path, force: bool) -> pydicom.dataset.Dataset | None:
-    try:
-        ds = pydicom.dcmread(str(path), stop_before_pixels=True, force=force)
-    except Exception:
-        return None
-    if not hasattr(ds, "SeriesInstanceUID") or not hasattr(ds, "SOPInstanceUID"):
-        return None
-    return ds
+    return classify_dicom_file(path, force).dataset
 
 
 def format_template(template: str, context: dict[str, Any], label: str) -> str:
@@ -1540,13 +1773,24 @@ def format_template(template: str, context: dict[str, Any], label: str) -> str:
         raise ValueError(f"Unknown key in {label} template: {key}") from exc
 
 
-def resolve_collision(path: Path, seen: set[Path], if_exists: str) -> Path | None:
+def resolve_collision(
+    path: Path,
+    seen: set[Path],
+    if_exists: str,
+    *,
+    dry_run: bool = False,
+) -> Path | None:
     if path in seen:
         return suffixed_path(path, seen)
     if not path.exists():
         return path
     if if_exists == "error":
-        raise FileExistsError(f"Target exists: {path}")
+        if dry_run:
+            return path
+        raise FileExistsError(
+            f"Target exists: {path}. "
+            "Re-run with --if-exists skip to continue into an existing output folder."
+        )
     if if_exists == "skip":
         return None
     if if_exists == "overwrite":
@@ -1593,16 +1837,43 @@ def assign_series_dirs(
     return assigned
 
 
-def materialize(source: Path, destination: Path, action: str, overwrite: bool) -> None:
+def compute_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while chunk := f.read(1024 * 1024):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def materialize(
+    source: Path,
+    destination: Path,
+    action: str,
+    overwrite: bool,
+    *,
+    checksum: bool = False,
+) -> str:
+    """Materialize source at destination using specified action.
+
+    Returns the source SHA-256 hex digest when checksum is True, otherwise "N/A".
+    """
     if action not in ACTIONS:
         raise ValueError(f"Unsupported action: {action}")
     if not overwrite and (destination.exists() or destination.is_symlink()):
-        raise FileExistsError(f"Target exists: {destination}")
+        raise FileExistsError(
+            f"Target exists: {destination}. "
+            "Re-run with --if-exists skip to continue into an existing output folder."
+        )
+
+    src_size = source.stat().st_size
+    src_sha = compute_sha256(source) if checksum else "N/A"
 
     if action == "move":
         try:
-            os.replace(source, destination)  # Atomic on the same filesystem
-            return
+            os.replace(source, destination)  # Atomic on same filesystem
+            if destination.stat().st_size != src_size:
+                raise IntegrityError(f"File size mismatch after move: {destination}")
+            return src_sha
         except OSError as exc:
             if exc.errno != errno.EXDEV:
                 raise
@@ -1611,10 +1882,29 @@ def materialize(source: Path, destination: Path, action: str, overwrite: bool) -
     try:
         if action in ("copy", "move"):
             shutil.copy2(source, temp_path)
+            if temp_path.stat().st_size != src_size:
+                raise IntegrityError(
+                    f"Size mismatch during copy: {temp_path.stat().st_size} != {src_size}"
+                )
+            if checksum:
+                dst_sha = compute_sha256(temp_path)
+                if dst_sha != src_sha:
+                    raise IntegrityError(
+                        f"SHA-256 mismatch during copy: {dst_sha} != {src_sha}"
+                    )
         elif action == "symlink":
             temp_path.symlink_to(source)
+            if temp_path.resolve() != source.resolve():
+                raise IntegrityError(
+                    f"Symlink does not resolve to source: {temp_path} -> {source}"
+                )
         elif action == "hardlink":
             os.link(source, temp_path)
+            if not os.path.samefile(source, temp_path):
+                raise IntegrityError(
+                    f"Hardlink is not the same file: {temp_path} and {source}"
+                )
+
         os.replace(temp_path, destination)
     except BaseException:
         try:
@@ -1626,24 +1916,314 @@ def materialize(source: Path, destination: Path, action: str, overwrite: bool) -
     if action == "move":
         source.unlink()
 
+    return src_sha
 
-def build_items(args: argparse.Namespace | OrganizeOptions) -> tuple[list[OrganizedItem], Counter[str]]:
-    options = normalize_options(args)
+
+def write_file_report(
+    output_root: Path,
+    input_root: Path,
+    records: list[FileRecord],
+) -> Path:
+    path = ensure_within_output_root(output_root, output_root / "file_report.csv")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, str]] = []
+    for record in records:
+        try:
+            source_rel = record.source.relative_to(input_root).as_posix()
+        except ValueError:
+            source_rel = str(record.source)
+
+        dup_rel = "N/A"
+        if record.duplicate_of is not None:
+            try:
+                dup_rel = record.duplicate_of.relative_to(input_root).as_posix()
+            except ValueError:
+                dup_rel = str(record.duplicate_of)
+
+        dest_rel = "N/A"
+        if record.destination is not None:
+            try:
+                dest_rel = record.destination.relative_to(output_root).as_posix()
+            except ValueError:
+                dest_rel = str(record.destination)
+
+        size_str = str(record.size_bytes) if record.size_bytes is not None else "N/A"
+
+        rows.append({
+            "SourceFileName": source_rel,
+            "Status": record.status,
+            "Reason": record.reason,
+            "Detail": record.detail,
+            "OrganizedFileName": dest_rel,
+            "DuplicateOf": dup_rel,
+            "SOPInstanceUID": record.sop_instance_uid,
+            "SeriesUID": record.series_uid,
+            "Modality": record.modality,
+            "SizeBytes": size_str,
+            "SHA256": record.sha256,
+        })
+    rows.sort(key=lambda r: r["SourceFileName"])
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=FILE_REPORT_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
+def collect_reports(output_root: Path, items: list[OrganizedItem]) -> list[str]:
+    reports: list[str] = ["file_report.csv"]
+    group_dirs = sorted({item.destination.parent.parent for item in items}, key=lambda p: str(p))
+    for group_dir in group_dirs:
+        try:
+            rel_group = group_dir.relative_to(output_root).as_posix()
+            reports.append(f"{rel_group}/dicom_parameters.csv")
+            reports.append(f"{rel_group}/series_summary.csv")
+        except ValueError:
+            pass
+    reports.append("organize_summary.json")
+    return reports
+
+
+def check_previous_run(output_root: Path) -> tuple[str | None, list[str]]:
+    summary_path = output_root / "organize_summary.json"
+    if not summary_path.exists():
+        return None, []
+    try:
+        data = json.loads(summary_path.read_text(encoding="utf-8"))
+        prev_status = data.get("status")
+        if prev_status in ("running", "cancelled", "interrupted", "failed"):
+            warning = (
+                f"Previous run was not completed (status={prev_status}). "
+                "Re-run with --if-exists skip to continue into an existing output folder."
+            )
+            return prev_status, [warning]
+    except Exception:
+        pass
+    return None, []
+
+
+def find_existing_ancestor(path: Path) -> Path:
+    cur = path.resolve()
+    while not cur.exists():
+        cur = cur.parent
+    return cur
+
+
+def check_free_space(
+    items: list[OrganizedItem],
+    output_root: Path,
+    input_root: Path,
+    action: str,
+    space_check: bool,
+) -> dict[str, Any]:
+    if not space_check or not items:
+        return {"checked": False, "required_bytes": None, "free_bytes": None}
+
+    ancestor = find_existing_ancestor(output_root)
+    needs_check = False
+    if action == "copy":
+        needs_check = True
+    elif action == "move":
+        try:
+            in_dev = os.stat(input_root).st_dev
+            out_dev = os.stat(ancestor).st_dev
+            needs_check = in_dev != out_dev
+        except OSError:
+            needs_check = True
+
+    if not needs_check:
+        return {"checked": False, "required_bytes": None, "free_bytes": None}
+
+    total_bytes = 0
+    for item in items:
+        try:
+            total_bytes += item.source.stat().st_size
+        except OSError:
+            pass
+
+    margin = max(64 * 1024 * 1024, total_bytes // 50)
+    required = total_bytes + margin
+    usage = shutil.disk_usage(ancestor)
+    free = usage.free
+
+    if free < required:
+        def _fmt(b: int) -> str:
+            val = float(b)
+            for unit in ["B", "KiB", "MiB", "GiB", "TiB"]:
+                if val < 1024 or unit == "TiB":
+                    return f"{val:.1f} {unit}" if unit != "B" else f"{int(val)} B"
+                val /= 1024
+            return f"{b} B"
+
+        raise InsufficientSpaceError(
+            f"Insufficient free space on destination: required {_fmt(required)} ({required} bytes), "
+            f"available {_fmt(free)} ({free} bytes)"
+        )
+
+    return {"checked": True, "required_bytes": required, "free_bytes": free}
+
+
+def plan_organization(
+    options: OrganizeOptions,
+    progress: Callable[[ProgressEvent], None] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> tuple[
+    list[OrganizedItem],
+    list[FileRecord],
+    Counter[str],
+    list[dict[str, str]],
+    bool,
+    bool,
+]:
     input_root = options.input_root
     output_root = options.output_root
     stats: Counter[str] = Counter()
-    seen_destinations: set[Path] = set()
-    items: list[OrganizedItem] = []
-    dicom_tag_specs = parse_dicom_tag_specs(options.dicom_tags)
-    pending_sources: list[tuple[Path, dict[str, Any], str, tuple[Any, ...]]] = []
+    for r in SKIP_REASONS:
+        stats[f"skip_{r}"] = 0
+    stats["existing_output_conflicts"] = 0
 
-    for source in iter_candidate_files(input_root, output_root, options):
+    if progress:
+        progress(
+            ProgressEvent(
+                stage="discover",
+                done=0,
+                total=None,
+                message="Scanning input directory...",
+            )
+        )
+
+    candidates, hidden_files, excluded_dirs = scan_candidates(
+        input_root, output_root, options, cancel_event
+    )
+
+    if cancel_event is not None and cancel_event.is_set():
+        if progress:
+            progress(
+                ProgressEvent(
+                    stage="discover",
+                    done=len(candidates),
+                    total=len(candidates),
+                    message="Cancelled during discover",
+                )
+            )
+        return [], [], stats, excluded_dirs, False, True
+
+    if progress:
+        progress(
+            ProgressEvent(
+                stage="discover",
+                done=len(candidates),
+                total=len(candidates),
+                message=f"Found {len(candidates)} candidate files",
+            )
+        )
+
+    # Stage: read
+    total_candidates = len(candidates)
+    if progress:
+        progress(
+            ProgressEvent(
+                stage="read",
+                done=0,
+                total=total_candidates,
+                message="Reading headers...",
+            )
+        )
+
+    dicom_tag_specs = parse_dicom_tag_specs(options.dicom_tags)
+    pending_sources: list[tuple[Path, dict[str, Any], str, tuple[Any, ...], FileRecord]] = []
+    seen_sop_trackers: dict[str, _SopTracker] = {}
+    file_records: list[FileRecord] = []
+    limit_reached = False
+    read_count = 0
+
+    for i, source in enumerate(candidates, 1):
+        read_count = i
+        if cancel_event is not None and cancel_event.is_set():
+            if progress:
+                progress(
+                    ProgressEvent(
+                        stage="read",
+                        done=i - 1,
+                        total=total_candidates,
+                        message="Cancelled during read",
+                    )
+                )
+            return [], file_records, stats, excluded_dirs, False, True
+
         stats["candidate_files"] += 1
-        ds = read_dicom_header(source, force=options.force_read)
-        if ds is None:
-            stats["skipped_non_dicom"] += 1
+        try:
+            size_bytes = source.stat().st_size
+        except OSError:
+            size_bytes = None
+
+        read_result = classify_dicom_file(source, force=options.force_read)
+        if read_result.reason != "N/A":
+            stats[f"skip_{read_result.reason}"] += 1
+            if read_result.reason == "not_dicom":
+                stats["skipped_non_dicom"] += 1
             if options.verbose:
-                print(f"[skip] non-DICOM: {source}", file=sys.stderr)
+                print(
+                    f"[skip] {read_result.reason}: {source} ({read_result.detail})",
+                    file=sys.stderr,
+                )
+            file_records.append(
+                FileRecord(
+                    source=source,
+                    status="skipped",
+                    reason=read_result.reason,
+                    detail=read_result.detail,
+                    size_bytes=size_bytes,
+                )
+            )
+            if progress:
+                progress(ProgressEvent(stage="read", done=i, total=total_candidates))
+            continue
+
+        ds = read_result.dataset
+        assert ds is not None
+        sop_uid = ds_value(ds, "SOPInstanceUID")
+        series_uid = ds_value(ds, "SeriesInstanceUID")
+        modality = ds_value(ds, "Modality")
+
+        # Duplicate SOPInstanceUID check
+        is_identical_dup = False
+        is_conflict_dup = False
+        duplicate_of: Path | None = None
+        curr_sha: str | None = None
+
+        if sop_uid in seen_sop_trackers:
+            tracker = seen_sop_trackers[sop_uid]
+            if not tracker.hashes:
+                first_sha = compute_sha256(tracker.first_source)
+                tracker.first_record.sha256 = first_sha
+                tracker.hashes[first_sha] = tracker.first_source
+            curr_sha = compute_sha256(source)
+            if curr_sha in tracker.hashes:
+                is_identical_dup = True
+                duplicate_of = tracker.hashes[curr_sha]
+            else:
+                is_conflict_dup = True
+                tracker.hashes[curr_sha] = source
+                duplicate_of = tracker.first_source
+        if is_identical_dup:
+            stats["skip_duplicate_identical"] += 1
+            file_records.append(
+                FileRecord(
+                    source=source,
+                    status="skipped",
+                    reason="duplicate_identical",
+                    detail="identical SOPInstanceUID and content",
+                    duplicate_of=duplicate_of,
+                    sop_instance_uid=sop_uid,
+                    series_uid=series_uid,
+                    modality=modality,
+                    size_bytes=size_bytes,
+                    sha256=curr_sha if curr_sha is not None else "N/A",
+                )
+            )
+            if progress:
+                progress(ProgressEvent(stage="read", done=i, total=total_candidates))
             continue
 
         item_index = stats["dicom_files"] + 1
@@ -1658,16 +2238,109 @@ def build_items(args: argparse.Namespace | OrganizeOptions) -> tuple[list[Organi
         study_date = context["study_date"]
         device_folder = context["device_folder"]
         filename = safe_name(format_template(options.file_template, context, "file"))
-        pending_sources.append(
-            (source, context, filename, (device_folder, study_date, context["series_uid"]))
+
+        rec = FileRecord(
+            source=source,
+            status="planned" if options.dry_run else "organized",
+            reason="duplicate_conflict" if is_conflict_dup else "N/A",
+            detail="duplicate SOPInstanceUID with different content"
+            if is_conflict_dup
+            else "N/A",
+            duplicate_of=duplicate_of,
+            sop_instance_uid=sop_uid,
+            series_uid=series_uid,
+            modality=modality,
+            size_bytes=size_bytes,
+            sha256=curr_sha if curr_sha is not None else "N/A",
         )
+        if sop_uid not in seen_sop_trackers:
+            seen_sop_trackers[sop_uid] = _SopTracker(first_source=source, first_record=rec)
+        if is_conflict_dup:
+            stats["duplicate_conflicts"] += 1
+
+        pending_sources.append(
+            (
+                source,
+                context,
+                filename,
+                (device_folder, study_date, context["series_uid"]),
+                rec,
+            )
+        )
+        file_records.append(rec)
         stats["dicom_files"] += 1
 
+        if progress:
+            progress(ProgressEvent(stage="read", done=i, total=total_candidates))
+
         if options.limit and stats["dicom_files"] >= options.limit:
+            limit_reached = True
             break
 
-    pending_assignments = resolved_series_assignments(pending_sources)
-    pending: list[tuple[Path, dict[str, Any], str, tuple[Any, ...]]] = []
+    # Add hidden files to file_records
+    for hidden in hidden_files:
+        try:
+            h_size = hidden.stat().st_size
+        except OSError:
+            h_size = None
+        stats["skip_excluded_hidden"] += 1
+        file_records.append(
+            FileRecord(
+                source=hidden,
+                status="skipped",
+                reason="excluded_hidden",
+                detail="hidden file excluded by default",
+                size_bytes=h_size,
+            )
+        )
+
+    if progress:
+        if limit_reached:
+            progress(
+                ProgressEvent(
+                    stage="read",
+                    done=read_count,
+                    total=read_count,
+                    message=f"Limit of {options.limit} files reached",
+                )
+            )
+        else:
+            progress(
+                ProgressEvent(
+                    stage="read",
+                    done=total_candidates,
+                    total=total_candidates,
+                    message="Read completed",
+                )
+            )
+
+    # Stage: plan
+    if progress:
+        progress(
+            ProgressEvent(
+                stage="plan",
+                done=0,
+                total=len(pending_sources),
+                message="Planning destinations...",
+            )
+        )
+
+    if cancel_event is not None and cancel_event.is_set():
+        if progress:
+            progress(
+                ProgressEvent(
+                    stage="plan",
+                    done=0,
+                    total=len(pending_sources),
+                    message="Cancelled before planning",
+                )
+            )
+        return [], file_records, stats, excluded_dirs, limit_reached, True
+
+    pending_assignments = resolved_series_assignments(
+        [(s, c, f, k) for s, c, f, k, _r in pending_sources]
+    )
+    pending: list[tuple[Path, dict[str, Any], str, tuple[Any, ...], FileRecord]] = []
     series_order: list[tuple[Any, ...]] = []
     base_dir_by_series: dict[tuple[Any, ...], Path] = {}
     for (
@@ -1675,6 +2348,7 @@ def build_items(args: argparse.Namespace | OrganizeOptions) -> tuple[list[Organi
         context,
         filename,
         _base_series_key,
+        rec,
     ), (series_key, series_context) in zip(pending_sources, pending_assignments):
         series_template_context = dict(context)
         series_template_context.update(series_context)
@@ -1691,23 +2365,59 @@ def build_items(args: argparse.Namespace | OrganizeOptions) -> tuple[list[Organi
         if series_key not in base_dir_by_series:
             base_dir_by_series[series_key] = base_dir
             series_order.append(series_key)
-        pending.append((source, context, filename, series_key))
+        pending.append((source, context, filename, series_key, rec))
 
     series_dirs = assign_series_dirs(base_dir_by_series, series_order)
+    seen_destinations: set[Path] = set()
+    items: list[OrganizedItem] = []
 
-    for source, context, filename, series_key in pending:
+    for source, context, filename, series_key, rec in pending:
         destination = series_dirs[series_key] / filename
-        resolved = resolve_collision(destination, seen_destinations, options.if_exists)
+        resolved = resolve_collision(
+            destination,
+            seen_destinations,
+            options.if_exists,
+            dry_run=options.dry_run,
+        )
         if resolved is None:
             stats["skipped_existing"] += 1
+            stats["skip_existing_output"] += 1
+            rec.status = "skipped"
+            rec.reason = "existing_output"
+            rec.detail = "destination already exists and if_exists is skip"
+            rec.destination = destination
             continue
 
         resolved = ensure_within_output_root(output_root, resolved)
         seen_destinations.add(resolved)
+        rec.destination = resolved
         row = dict(context["row"])
         row["OrganizedFileName"] = resolved.relative_to(output_root).as_posix()
         items.append(OrganizedItem(source=source, destination=resolved, row=row))
 
+        if options.dry_run and options.if_exists == "error":
+            if resolved.exists() or resolved.is_symlink():
+                stats["existing_output_conflicts"] += 1
+                rec.detail = "destination already exists in output folder"
+
+    if progress:
+        progress(
+            ProgressEvent(
+                stage="plan",
+                done=len(items),
+                total=len(items),
+                message=f"Planned {len(items)} files",
+            )
+        )
+
+    return items, file_records, stats, excluded_dirs, limit_reached, False
+
+
+def build_items(
+    args: argparse.Namespace | OrganizeOptions,
+) -> tuple[list[OrganizedItem], Counter[str]]:
+    options = normalize_options(args)
+    items, _records, stats, _excluded, _limit, _cancelled = plan_organization(options)
     return items, stats
 
 
@@ -1876,17 +2586,63 @@ def write_run_summary(
     options: OrganizeOptions,
     started_at: str,
     ended_at: str,
+    *,
+    status: str = "completed",
+    error: str | None = None,
+    planned_files: int | None = None,
+    not_processed_files: int = 0,
+    excluded_directories: list[dict[str, str]] | None = None,
+    limit_reached: bool = False,
+    space_check_info: dict[str, Any] | None = None,
+    previous_run_status: str | None = None,
+    warnings_list: list[str] | None = None,
+    reports: list[str] | None = None,
 ) -> None:
-    by_series = Counter(item.destination.parent.relative_to(output_root).as_posix() for item in items)
+    by_series = Counter(
+        item.destination.parent.relative_to(output_root).as_posix() for item in items
+    )
     by_date = Counter(item.row["AcquisitionDate"] for item in items)
     device_dates = Counter(
         item.destination.parent.parent.relative_to(output_root).as_posix() for item in items
     )
-    summary_counts = summarize_items(items, stats, output_root, options.profile)
+    summary_counts = summarize_items(items, stats, output_root, options.profile, status=status)
+
+    skipped_by_reason: dict[str, int] = {}
+    for reason in SKIP_REASONS:
+        count = stats.get(f"skip_{reason}", 0)
+        if count > 0:
+            skipped_by_reason[reason] = count
+
     summary = {
+        "output_schema_version": OUTPUT_SCHEMA_VERSION,
+        "software": {
+            "name": "dicom-organizer",
+            "version": package_version(),
+            "python": sys.version.split()[0],
+            "pydicom": pydicom.__version__,
+            "platform": platform.platform(),
+        },
+        "options": {
+            "action": options.action,
+            "if_exists": options.if_exists,
+            "dry_run": options.dry_run,
+            "force_read": options.force_read,
+            "include_hidden": options.include_hidden,
+            "include_organized": options.include_organized,
+            "limit": options.limit,
+            "series_dir_template": options.series_dir_template,
+            "file_template": options.file_template,
+            "profile": options.profile,
+            "patient_mode": options.patient_mode,
+            "dicom_tags": list(options.dicom_tags),
+            "checksum": options.checksum,
+            "space_check": options.space_check,
+        },
         "started_at": started_at,
         "ended_at": ended_at,
-        "status": "dry_run" if options.dry_run else "completed",
+        "status": status,
+        "error": error,
+        "checksum": options.checksum,
         "input_root": str(options.input_root),
         "output_root": str(output_root),
         "action": options.action,
@@ -1896,15 +2652,27 @@ def write_run_summary(
         "patient_mode": options.patient_mode,
         "dicom_tags": list(options.dicom_tags),
         "candidate_files": stats["candidate_files"],
+        "planned_files": planned_files if planned_files is not None else len(items),
         "organized_files": len(items),
+        "not_processed_files": not_processed_files,
         "csv_target_files": summary_counts["csv_target_files"],
         "csv_excluded_files": summary_counts["csv_excluded_files"],
         "csv_excluded_non_image_files": summary_counts["csv_excluded_non_image_files"],
         "organized_files_by_modality": summary_counts["organized_files_by_modality"],
         "csv_target_files_by_modality": summary_counts["csv_target_files_by_modality"],
         "csv_excluded_files_by_modality": summary_counts["csv_excluded_files_by_modality"],
-        "skipped_non_dicom": stats["skipped_non_dicom"],
+        "skipped_by_reason": skipped_by_reason,
+        "skipped_non_dicom": skipped_by_reason.get("not_dicom", 0),
         "skipped_existing": stats["skipped_existing"],
+        "duplicate_conflicts": stats.get("duplicate_conflicts", 0),
+        "existing_output_conflicts": stats.get("existing_output_conflicts", 0),
+        "excluded_directories": excluded_directories or [],
+        "limit_reached": limit_reached,
+        "space_check": space_check_info
+        or {"checked": False, "required_bytes": None, "free_bytes": None},
+        "previous_run_status": previous_run_status,
+        "warnings": warnings_list or [],
+        "reports": reports or [],
         "device_dates": dict(sorted(device_dates.items())),
         "acquisition_dates": dict(sorted(by_date.items())),
         "series_count": len(by_series),
@@ -1921,18 +2689,28 @@ def summarize_items(
     stats: Counter[str],
     output_root: Path,
     profile_name: str = "auto",
+    status: str = "completed",
 ) -> dict[str, Any]:
     by_date = Counter(item.row["AcquisitionDate"] for item in items)
     device_dates = Counter(
         item.destination.parent.parent.relative_to(output_root).as_posix() for item in items
     )
-    by_series = Counter(item.destination.parent.relative_to(output_root).as_posix() for item in items)
+    by_series = Counter(
+        item.destination.parent.relative_to(output_root).as_posix() for item in items
+    )
     rows = [item.row for item in items]
     csv_target_rows = metadata_rows(rows, profile_name)
     csv_target_row_ids = {id(row) for row in csv_target_rows}
     csv_excluded_rows = [row for row in rows if id(row) not in csv_target_row_ids]
     csv_target_files = len(csv_target_rows)
     csv_excluded_files = len(items) - csv_target_files
+
+    skipped_by_reason: dict[str, int] = {}
+    for reason in SKIP_REASONS:
+        count = stats.get(f"skip_{reason}", 0)
+        if count > 0:
+            skipped_by_reason[reason] = count
+
     return {
         "candidate_files": stats["candidate_files"],
         "organized_files": len(items),
@@ -1943,8 +2721,12 @@ def summarize_items(
         "csv_target_files_by_modality": modality_counts(csv_target_rows),
         "csv_excluded_files_by_modality": modality_counts(csv_excluded_rows),
         "series_count": len(by_series),
-        "skipped_non_dicom": stats["skipped_non_dicom"],
+        "skipped_non_dicom": skipped_by_reason.get("not_dicom", 0),
         "skipped_existing": stats["skipped_existing"],
+        "skipped_by_reason": skipped_by_reason,
+        "duplicate_conflicts": stats.get("duplicate_conflicts", 0),
+        "existing_output_conflicts": stats.get("existing_output_conflicts", 0),
+        "status": status,
         "device_dates": dict(sorted(device_dates.items())),
         "acquisition_dates": dict(sorted(by_date.items())),
         "output_root": str(output_root),
@@ -1975,8 +2757,10 @@ def print_summary(
     profile_name: str = "auto",
     *,
     dry_run: bool = False,
+    status: str = "completed",
 ) -> None:
-    summary = summarize_items(items, stats, output_root, profile_name)
+    summary = summarize_items(items, stats, output_root, profile_name, status=status)
+    print(f"status={summary['status']}")
     print(f"profile={summary['profile']}")
     print(f"candidate_files={summary['candidate_files']}")
     print(f"organized_files={summary['organized_files']}")
@@ -1997,6 +2781,8 @@ def print_summary(
     print(f"series_count={summary['series_count']}")
     print(f"skipped_non_dicom={summary['skipped_non_dicom']}")
     print(f"skipped_existing={summary['skipped_existing']}")
+    print(f"skipped_by_reason={format_counts(summary.get('skipped_by_reason', {}))}")
+    print(f"duplicate_conflicts={summary.get('duplicate_conflicts', 0)}")
     for device_date, count in summary.get("device_dates", {}).items():
         print(f"{device_date}: files={count}")
     print(f"output_root={output_root}")
@@ -2006,49 +2792,328 @@ def print_summary(
             print(f"  {output}")
 
 
-def run(args: argparse.Namespace | OrganizeOptions, *, dry_run: bool | None = None) -> OrganizeResult:
+def make_cli_progress() -> Callable[[ProgressEvent], None]:
+    import time
+
+    last_update = 0.0
+    last_stage: str | None = None
+
+    def _progress(event: ProgressEvent) -> None:
+        nonlocal last_update, last_stage
+        now = time.monotonic()
+        if event.stage != last_stage:
+            if last_stage is not None:
+                sys.stderr.write("\n")
+            last_stage = event.stage
+            last_update = 0.0
+
+        is_terminal = (event.total is not None and event.done == event.total) or event.done == 0
+        if not is_terminal and (now - last_update < 0.1):
+            return
+        last_update = now
+
+        if event.total is not None:
+            msg = f"[{event.stage}] {event.done}/{event.total}"
+        else:
+            msg = f"[{event.stage}] {event.done}"
+        sys.stderr.write(f"\r{msg}")
+        sys.stderr.flush()
+        if (
+            event.total is not None
+            and event.done == event.total
+            and event.stage in ("copy", "write")
+        ):
+            sys.stderr.write("\n")
+            sys.stderr.flush()
+
+    return _progress
+
+
+def run(
+    args: argparse.Namespace | OrganizeOptions,
+    *,
+    dry_run: bool | None = None,
+    progress: Callable[[ProgressEvent], None] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> OrganizeResult:
     options = normalize_options(args, dry_run=dry_run, validate=True)
     started_at = datetime.now(timezone.utc).isoformat()
 
-    items, stats = build_items(options)
-    dicom_tag_specs = parse_dicom_tag_specs(options.dicom_tags)
+    # Check previous run
+    previous_run_status, prev_warnings = check_previous_run(options.output_root)
+    warnings_list = list(prev_warnings)
 
-    if not options.dry_run:
-        for item in items:
+    items, file_records, stats, excluded_dirs, limit_reached, cancelled = plan_organization(
+        options, progress=progress, cancel_event=cancel_event
+    )
+
+    if cancelled:
+        ended_at = datetime.now(timezone.utc).isoformat()
+        return OrganizeResult(
+            items=[],
+            stats=stats,
+            output_root=options.output_root,
+            started_at=started_at,
+            ended_at=ended_at,
+            dry_run=options.dry_run,
+            profile=options.profile,
+            status="cancelled",
+            file_records=file_records,
+            warnings=warnings_list,
+            previous_run_status=previous_run_status,
+        )
+
+    if options.dry_run:
+        if stats.get("existing_output_conflicts", 0) > 0:
+            n = stats["existing_output_conflicts"]
+            warnings_list.append(
+                f"{n} planned file(s) already exist at destination; real execution with --if-exists error "
+                "will abort on the first existing file. Re-run with --if-exists skip to continue into an "
+                "existing output folder, or use overwrite/rename."
+            )
+        ended_at = datetime.now(timezone.utc).isoformat()
+        return OrganizeResult(
+            items=items,
+            stats=stats,
+            output_root=options.output_root,
+            started_at=started_at,
+            ended_at=ended_at,
+            dry_run=True,
+            profile=options.profile,
+            status="dry_run",
+            file_records=file_records,
+            warnings=warnings_list,
+            previous_run_status=previous_run_status,
+        )
+
+    space_check_info = check_free_space(
+        items,
+        options.output_root,
+        options.input_root,
+        options.action,
+        options.space_check,
+    )
+
+    planned_files = len(items)
+    records_by_dest = {rec.destination: rec for rec in file_records if rec.destination is not None}
+
+    # Write initial "running" summary
+    write_run_summary(
+        options.output_root,
+        [],
+        stats,
+        options,
+        started_at,
+        "",
+        status="running",
+        planned_files=planned_files,
+        not_processed_files=planned_files,
+        excluded_directories=excluded_dirs,
+        limit_reached=limit_reached,
+        space_check_info=space_check_info,
+        previous_run_status=previous_run_status,
+        warnings_list=warnings_list,
+    )
+
+    total_items = len(items)
+    if progress:
+        progress(ProgressEvent(stage="copy", done=0, total=total_items, message="Placing files..."))
+
+    placed_items: list[OrganizedItem] = []
+    run_status = "completed"
+    records_placed: set[Path] = set()
+
+    def _mark_remaining(reason: str):
+        for item in items[len(placed_items):]:
+            rec = records_by_dest.get(item.destination)
+            if rec is not None and rec.source not in records_placed:
+                rec.status = "not_processed"
+                rec.reason = reason
+                rec.detail = f"processing was {reason} before this file could be placed"
+
+    def _write_partial(st: str, err: str | None = None):
+        try:
+            write_metadata_tables(
+                options.output_root,
+                placed_items,
+                options.profile,
+                extra_metadata_columns=[
+                    spec.column for spec in parse_dicom_tag_specs(options.dicom_tags)
+                ],
+            )
+            write_file_report(options.output_root, options.input_root, file_records)
+            reports_list = collect_reports(options.output_root, placed_items)
+            write_run_summary(
+                options.output_root,
+                placed_items,
+                stats,
+                options,
+                started_at,
+                datetime.now(timezone.utc).isoformat(),
+                status=st,
+                error=err,
+                planned_files=planned_files,
+                not_processed_files=planned_files - len(placed_items),
+                excluded_directories=excluded_dirs,
+                limit_reached=limit_reached,
+                space_check_info=space_check_info,
+                previous_run_status=previous_run_status,
+                warnings_list=warnings_list,
+                reports=reports_list,
+            )
+        except Exception:
+            pass
+
+    try:
+        for idx, item in enumerate(items, 1):
+            if cancel_event is not None and cancel_event.is_set():
+                run_status = "cancelled"
+                _mark_remaining("cancelled")
+                _write_partial("cancelled")
+                if progress:
+                    progress(
+                        ProgressEvent(
+                            stage="copy",
+                            done=len(placed_items),
+                            total=total_items,
+                            message="Cancelled during copy",
+                        )
+                    )
+                break
+
             item.destination.parent.mkdir(parents=True, exist_ok=True)
-            materialize(
+            sha256 = materialize(
                 item.source,
                 item.destination,
                 action=options.action,
-                overwrite=options.if_exists == "overwrite",
+                overwrite=(options.if_exists == "overwrite"),
+                checksum=options.checksum,
             )
-        write_metadata_tables(
-            options.output_root,
-            items,
-            options.profile,
-            extra_metadata_columns=[spec.column for spec in dicom_tag_specs],
+            rec = records_by_dest.get(item.destination)
+            if rec is not None:
+                if sha256 != "N/A":
+                    rec.sha256 = sha256
+                records_placed.add(rec.source)
+
+            placed_items.append(item)
+            if progress and idx < total_items:
+                progress(ProgressEvent(stage="copy", done=idx, total=total_items))
+
+    except KeyboardInterrupt:
+        _mark_remaining("interrupted")
+        _write_partial("interrupted")
+        raise
+    except Exception as exc:
+        error_msg = f"{type(exc).__name__}: {exc}"
+        _mark_remaining("failed")
+        _write_partial("failed", error_msg)
+        raise
+
+    if run_status != "cancelled" and progress:
+        progress(
+            ProgressEvent(
+                stage="copy",
+                done=len(placed_items),
+                total=total_items,
+                message="Copy completed",
+            )
         )
-        ended_at = datetime.now(timezone.utc).isoformat()
-        write_run_summary(options.output_root, items, stats, options, started_at, ended_at)
-    else:
-        ended_at = datetime.now(timezone.utc).isoformat()
+
+    ended_at = datetime.now(timezone.utc).isoformat()
+
+    if run_status == "cancelled":
+        return OrganizeResult(
+            items=placed_items,
+            stats=stats,
+            output_root=options.output_root,
+            started_at=started_at,
+            ended_at=ended_at,
+            dry_run=False,
+            profile=options.profile,
+            status="cancelled",
+            file_records=file_records,
+            warnings=warnings_list,
+            previous_run_status=previous_run_status,
+        )
+
+    if progress:
+        progress(ProgressEvent(stage="write", done=0, total=None, message="Writing reports..."))
+
+    write_metadata_tables(
+        options.output_root,
+        placed_items,
+        options.profile,
+        extra_metadata_columns=[
+            spec.column for spec in parse_dicom_tag_specs(options.dicom_tags)
+        ],
+    )
+    write_file_report(options.output_root, options.input_root, file_records)
+    reports_list = collect_reports(options.output_root, placed_items)
+    write_run_summary(
+        options.output_root,
+        placed_items,
+        stats,
+        options,
+        started_at,
+        ended_at,
+        status="completed",
+        error=None,
+        planned_files=planned_files,
+        not_processed_files=0,
+        excluded_directories=excluded_dirs,
+        limit_reached=limit_reached,
+        space_check_info=space_check_info,
+        previous_run_status=previous_run_status,
+        warnings_list=warnings_list,
+        reports=reports_list,
+    )
+
+    if progress:
+        progress(
+            ProgressEvent(
+                stage="write",
+                done=1,
+                total=1,
+                message="Reports written successfully",
+            )
+        )
 
     return OrganizeResult(
-        items=items,
+        items=placed_items,
         stats=stats,
         output_root=options.output_root,
         started_at=started_at,
         ended_at=ended_at,
-        dry_run=options.dry_run,
+        dry_run=False,
         profile=options.profile,
+        status="completed",
+        file_records=file_records,
+        warnings=warnings_list,
+        previous_run_status=previous_run_status,
     )
 
 
 def main() -> int:
     args = parse_args()
+    progress_callback = None
+    if getattr(args, "progress", True) and sys.stderr.isatty():
+        progress_callback = make_cli_progress()
 
     try:
-        result = run(args)
+        result = run(args, progress=progress_callback)
+    except KeyboardInterrupt:
+        print(
+            "Organization interrupted by user. If file placement had started, placed files and partial reports have been saved. "
+            "Re-run with --if-exists skip to continue into an existing output folder.",
+            file=sys.stderr,
+        )
+        return 130
+    except InsufficientSpaceError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except IntegrityError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     except FileNotFoundError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -2059,6 +3124,13 @@ def main() -> int:
         print(f"Failed while scanning: {exc}", file=sys.stderr)
         return 1
 
+    for warning in result.warnings:
+        print(f"WARNING: {warning}", file=sys.stderr)
+
+    if result.status == "cancelled":
+        print("Organization was cancelled.", file=sys.stderr)
+        return 1
+
     if not result.items:
         print("No DICOM files were organized.", file=sys.stderr)
         print_summary(
@@ -2067,6 +3139,7 @@ def main() -> int:
             result.output_root,
             result.profile,
             dry_run=result.dry_run,
+            status=result.status,
         )
         if result.stats["skipped_existing"] > 0:
             return 0
@@ -2078,6 +3151,7 @@ def main() -> int:
         result.output_root,
         result.profile,
         dry_run=result.dry_run,
+        status=result.status,
     )
     if result.dry_run:
         print("dry_run=true")

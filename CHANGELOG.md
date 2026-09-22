@@ -8,6 +8,17 @@ occur, but they should be documented here.
 
 ## 0.2.0 - Unreleased
 
+- Add granular skip reason classification (`SKIP_REASONS`) and `classify_dicom_file` to distinguish non-DICOM files, DICOMDIR, missing required UIDs, read errors, permission errors, hidden files, and duplicates.
+- Restrict `skipped_non_dicom` count strictly to files with `not_dicom` reason (breaking change from previously counting all unreadable candidates).
+- Add `file_report.csv` output to root directory providing per-file tracking of source-to-destination mappings, status, reasons, and file hashes.
+- Add `SOPInstanceUID` deduplication: skip identical duplicates without inflating `FileCount`, place conflicting duplicates with `duplicate_conflict` tracking, maintain content-hash history across multi-duplicate chains, and record SHA-256 digests on duplicate comparisons.
+- Add pre-existing output collision warnings and `existing_output_conflicts` tracking during dry runs with `--if-exists error`.
+- Sort `file_report.csv` rows by `SourceFileName` ascending.
+- Add staged progress event API (`ProgressEvent`) and console progress display (`--no-progress` to disable).
+- Support run cancellation and graceful recovery from interrupts and exceptions, recording partial runs as `cancelled`, `interrupted`, or `failed` and enabling resume via `--if-exists skip`.
+- Add pre-check for destination free disk space before copying or cross-device moves (`--no-space-check` to disable).
+- Add copy integrity verification and optional SHA-256 checksumming via `--checksum`.
+- Update `organize_summary.json` to schema version 2 with environment provenance, complete options snapshot, report listings, and failure diagnosis.
 - Add `ScanDuration` (formatted as `HH:MM:SS`) and `ScanDurationSource` columns to `dicom_parameters.csv` and `series_summary.csv`.
 - Restructure default output folder hierarchy to `organized/<Device>/<StudyDate>/<SeriesNumber>_<SeriesFolderLabel>/`.
 - Remove `SeriesUIDHash` column from metadata CSVs.

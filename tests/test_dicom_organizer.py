@@ -3,9 +3,13 @@ from __future__ import annotations
 import argparse
 import csv
 import errno
+import hashlib
 import json
+import os
+import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -25,8 +29,13 @@ from pydicom.uid import (
 from dicom_organizer.core import (
     DEFAULT_FILE_TEMPLATE,
     DEFAULT_SERIES_DIR_TEMPLATE,
+    FILE_REPORT_COLUMNS,
+    InsufficientSpaceError,
+    IntegrityError,
     OrganizeOptions,
+    ProgressEvent,
     build_items,
+    classify_dicom_file,
     ensure_within_output_root,
     format_duration,
     materialize,
@@ -2201,6 +2210,668 @@ def test_scan_duration_priority_standard_over_ge_private(tmp_path: Path) -> None
     assert len(summary_rows) == 1
     assert summary_rows[0]["ScanDuration"] == "00:08:48"
     assert summary_rows[0]["ScanDurationSource"] == "0018,9073"
+
+
+def test_skip_reasons_classification(tmp_path: Path) -> None:
+    # 1. Non-DICOM text
+    text_file = tmp_path / "notes.txt"
+    text_file.write_text("Hello DICOM", encoding="utf-8")
+    res = classify_dicom_file(text_file, force=True)
+    assert res.reason == "not_dicom"
+
+    # 2. Empty file
+    empty_file = tmp_path / "empty.bin"
+    empty_file.write_bytes(b"")
+    res = classify_dicom_file(empty_file, force=True)
+    assert res.reason == "not_dicom"
+
+    # 3. Truncated DICOM (has DICM prefix but truncated)
+    valid_dcm = tmp_path / "valid.dcm"
+    write_dicom(
+        valid_dcm,
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+    )
+    raw = valid_dcm.read_bytes()
+    truncated_file = tmp_path / "truncated.dcm"
+    truncated_file.write_bytes(raw[:200])
+    res = classify_dicom_file(truncated_file, force=True)
+    assert res.reason == "read_error"
+
+    # 4. Missing required UID (has DICOM attributes but no SeriesInstanceUID/SOPInstanceUID)
+    nouid_file = tmp_path / "nouid.dcm"
+    meta = FileMetaDataset()
+    meta.MediaStorageSOPClassUID = MRImageStorage
+    meta.MediaStorageSOPInstanceUID = generate_uid()
+    meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    ds = FileDataset(str(nouid_file), {}, file_meta=meta, preamble=b"\0" * 128)
+    ds.SOPClassUID = MRImageStorage
+    ds.Modality = "MR"
+    ds.save_as(nouid_file, enforce_file_format=True)
+    res = classify_dicom_file(nouid_file, force=True)
+    assert res.reason == "missing_required_uid"
+
+    # 5. Permission denied (if non-root and POSIX)
+    if os.name != "nt" and hasattr(os, "geteuid") and os.geteuid() != 0:
+        noperm_file = tmp_path / "noperm.dcm"
+        shutil.copy2(valid_dcm, noperm_file)
+        os.chmod(noperm_file, 0)
+        try:
+            res = classify_dicom_file(noperm_file, force=True)
+            assert res.reason == "permission_denied"
+        finally:
+            os.chmod(noperm_file, 0o644)
+
+    # 6. Valid DICOM
+    res = classify_dicom_file(valid_dcm, force=True)
+    assert res.reason == "N/A"
+    assert res.dataset is not None
+
+
+def test_file_report_csv_columns_and_content(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+    dcm = input_root / "img.dcm"
+    s_uid = generate_uid()
+    sop_uid = generate_uid()
+    write_dicom(
+        dcm,
+        series_uid=s_uid,
+        sop_uid=sop_uid,
+        series_number=1,
+        instance_number=1,
+        modality="MR",
+    )
+    (input_root / "readme.txt").write_text("plain text", encoding="utf-8")
+    (input_root / ".hidden.dcm").write_bytes(b"some hidden bytes")
+
+    result = run(OrganizeOptions(input_root=input_root, output_root=output_root))
+    assert result.status == "completed"
+
+    report_path = output_root / "file_report.csv"
+    assert report_path.exists()
+    with report_path.open(encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        headers = list(reader.fieldnames or [])
+        rows = list(reader)
+
+    assert headers == FILE_REPORT_COLUMNS
+    by_src = {r["SourceFileName"]: r for r in rows}
+    assert "img.dcm" in by_src
+    assert by_src["img.dcm"]["Status"] == "organized"
+    assert by_src["img.dcm"]["Reason"] == "N/A"
+    assert by_src["img.dcm"]["SOPInstanceUID"] == sop_uid
+    assert by_src["img.dcm"]["Modality"] == "MR"
+
+    assert "readme.txt" in by_src
+    assert by_src["readme.txt"]["Status"] == "skipped"
+    assert by_src["readme.txt"]["Reason"] == "not_dicom"
+
+    assert ".hidden.dcm" in by_src
+    assert by_src[".hidden.dcm"]["Status"] == "skipped"
+    assert by_src[".hidden.dcm"]["Reason"] == "excluded_hidden"
+
+
+def test_duplicates_handling_identical_and_conflict(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+
+    s1 = generate_uid()
+    sop1 = generate_uid()
+    write_dicom(
+        input_root / "img1.dcm",
+        series_uid=s1,
+        sop_uid=sop1,
+        series_number=1,
+        instance_number=1,
+    )
+    shutil.copy2(input_root / "img1.dcm", input_root / "img1_dup.dcm")
+
+    s2 = generate_uid()
+    conflict_sop = generate_uid()
+    write_dicom(
+        input_root / "conflict1.dcm",
+        series_uid=s2,
+        sop_uid=conflict_sop,
+        series_number=2,
+        instance_number=1,
+        patient_name="Patient^One",
+    )
+    write_dicom(
+        input_root / "conflict2.dcm",
+        series_uid=s2,
+        sop_uid=conflict_sop,
+        series_number=2,
+        instance_number=1,
+        patient_name="Patient^Two",
+    )
+
+    result = run(OrganizeOptions(input_root=input_root, output_root=output_root))
+    assert result.status == "completed"
+
+    placed_dcm = list(output_root.rglob("*.dcm"))
+    assert len(placed_dcm) == 3
+
+    with (output_root / "organize_summary.json").open(encoding="utf-8") as handle:
+        summary = json.load(handle)
+    assert summary["duplicate_conflicts"] == 1
+    assert summary["skipped_by_reason"].get("duplicate_identical") == 1
+
+
+def test_progress_events_sequence(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+    s_uid = generate_uid()
+    for i in range(1, 3):
+        write_dicom(
+            input_root / f"img_{i}.dcm",
+            series_uid=s_uid,
+            sop_uid=generate_uid(),
+            series_number=1,
+            instance_number=i,
+        )
+
+    events: list[ProgressEvent] = []
+    run(
+        OrganizeOptions(input_root=input_root, output_root=output_root),
+        progress=events.append,
+    )
+    stages = []
+    for e in events:
+        if not stages or stages[-1] != e.stage:
+            stages.append(e.stage)
+    assert stages == ["discover", "read", "plan", "copy", "write"]
+    copy_events = [e for e in events if e.stage == "copy"]
+    assert copy_events[0].done == 0
+    assert copy_events[-1].done == copy_events[-1].total == 2
+
+    dry_events: list[ProgressEvent] = []
+    run(
+        OrganizeOptions(input_root=input_root, output_root=tmp_path / "dry"),
+        dry_run=True,
+        progress=dry_events.append,
+    )
+    dry_stages = []
+    for e in dry_events:
+        if not dry_stages or dry_stages[-1] != e.stage:
+            dry_stages.append(e.stage)
+    assert dry_stages == ["discover", "read", "plan"]
+
+
+def test_cancel_during_copy_and_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+    s_uid = generate_uid()
+    for i in range(1, 5):
+        write_dicom(
+            input_root / f"img_{i}.dcm",
+            series_uid=s_uid,
+            sop_uid=generate_uid(),
+            series_number=1,
+            instance_number=i,
+        )
+
+    cancel = threading.Event()
+    call_count = 0
+    import dicom_organizer.core as core
+
+    original_mat = core.materialize
+
+    def _mat(*args, **kwargs):
+        nonlocal call_count
+        res = original_mat(*args, **kwargs)
+        call_count += 1
+        if call_count == 2:
+            cancel.set()
+        return res
+
+    monkeypatch.setattr(core, "materialize", _mat)
+    result = run(
+        OrganizeOptions(input_root=input_root, output_root=output_root),
+        cancel_event=cancel,
+    )
+    assert result.status == "cancelled"
+    assert len(list(output_root.rglob("*.dcm"))) == 2
+
+    summary = json.loads((output_root / "organize_summary.json").read_text(encoding="utf-8"))
+    assert summary["status"] == "cancelled"
+    assert summary["organized_files"] == 2
+    assert summary["not_processed_files"] == 2
+
+    monkeypatch.undo()
+    resumed = run(OrganizeOptions(input_root=input_root, output_root=output_root, if_exists="skip"))
+    assert resumed.status == "completed"
+    assert resumed.previous_run_status == "cancelled"
+    assert len(list(output_root.rglob("*.dcm"))) == 4
+
+
+def test_failure_during_copy_and_recovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+    s_uid = generate_uid()
+    for i in range(1, 4):
+        write_dicom(
+            input_root / f"img_{i}.dcm",
+            series_uid=s_uid,
+            sop_uid=generate_uid(),
+            series_number=1,
+            instance_number=i,
+        )
+
+    call_count = 0
+    import dicom_organizer.core as core
+
+    original_mat = core.materialize
+
+    def _failing_mat(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise RuntimeError("synthetic copy crash")
+        return original_mat(*args, **kwargs)
+
+    monkeypatch.setattr(core, "materialize", _failing_mat)
+    with pytest.raises(RuntimeError, match="synthetic copy crash"):
+        run(OrganizeOptions(input_root=input_root, output_root=output_root))
+
+    summary = json.loads((output_root / "organize_summary.json").read_text(encoding="utf-8"))
+    assert summary["status"] == "failed"
+    assert "synthetic copy crash" in summary["error"]
+
+    monkeypatch.undo()
+    preview = run(OrganizeOptions(input_root=input_root, output_root=output_root), dry_run=True)
+    assert preview.previous_run_status == "failed"
+    assert any("--if-exists skip" in w for w in preview.warnings)
+
+
+def test_insufficient_space_error_and_bypass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "img.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+    )
+
+    from collections import namedtuple
+
+    usage = namedtuple("usage", "total used free")
+    monkeypatch.setattr(shutil, "disk_usage", lambda _p: usage(10**10, 10**10 - 10, 10))
+
+    with pytest.raises(InsufficientSpaceError):
+        run(OrganizeOptions(input_root=input_root, output_root=output_root))
+
+    assert not output_root.exists()
+
+    res = run(OrganizeOptions(input_root=input_root, output_root=output_root, space_check=False))
+    assert res.status == "completed"
+
+
+def test_checksum_verification_and_integrity_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+    dcm = input_root / "img.dcm"
+    write_dicom(
+        dcm,
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+    )
+
+    res = run(OrganizeOptions(input_root=input_root, output_root=output_root, checksum=True))
+    assert res.status == "completed"
+    with (output_root / "file_report.csv").open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    expected_hash = hashlib.sha256(dcm.read_bytes()).hexdigest()
+    assert rows[0]["SHA256"] == expected_hash
+
+    corrupt_root = tmp_path / "corrupt_out"
+
+    def _bad_copy(src, dst, *args, **kwargs):
+        Path(dst).write_bytes(Path(src).read_bytes()[:-5])
+        return dst
+
+    monkeypatch.setattr(shutil, "copy2", _bad_copy)
+    with pytest.raises(IntegrityError):
+        run(OrganizeOptions(input_root=input_root, output_root=corrupt_root))
+    assert not list(corrupt_root.rglob("*.dcm"))
+
+
+def test_cli_wp1_options_and_interrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    input_root = tmp_path / "input"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "img.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+    )
+
+    parsed = parse_args([str(input_root), "--checksum", "--no-space-check", "--no-progress"])
+    assert parsed.checksum is True
+    assert parsed.space_check is False
+    assert parsed.progress is False
+
+    import io
+    import dicom_organizer.core as core
+
+    output_root = tmp_path / "out_interrupt"
+
+    def _interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(core, "materialize", _interrupt)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["dicom-organizer", str(input_root), "-o", str(output_root), "--no-progress"],
+    )
+    stderr = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    code = core.main()
+    assert code == 130
+    assert "--if-exists skip" in stderr.getvalue()
+
+
+def test_dicomdir_classification(tmp_path: Path) -> None:
+    from pydicom.fileset import FileSet
+
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    staging = tmp_path / "staging"
+    staging.mkdir(parents=True)
+    input_root.mkdir(parents=True)
+
+    img_path = staging / "img.dcm"
+    write_dicom(
+        img_path,
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+        study_time="120000",
+    )
+    ds = pydicom.dcmread(img_path)
+    ds.StudyID = "1"
+    file_set = FileSet()
+    file_set.add(ds)
+    file_set.write(input_root / "disc")
+
+    dicomdir_file = input_root / "disc" / "DICOMDIR"
+    assert dicomdir_file.exists()
+
+    result = classify_dicom_file(dicomdir_file, force=True)
+    assert result.reason == "dicomdir"
+
+    res = run(OrganizeOptions(input_root=input_root, output_root=output_root))
+    assert res.stats["skip_dicomdir"] == 1
+    with (output_root / "file_report.csv").open(encoding="utf-8-sig", newline="") as h:
+        rows = list(csv.DictReader(h))
+    dicomdir_row = next(r for r in rows if "DICOMDIR" in r["SourceFileName"])
+    assert dicomdir_row["Status"] == "skipped"
+    assert dicomdir_row["Reason"] == "dicomdir"
+
+
+def test_four_file_duplicate_chain_r2(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+
+    sop_uid = generate_uid()
+    series_uid = generate_uid()
+
+    # A: original
+    write_dicom(
+        input_root / "a.dcm",
+        series_uid=series_uid,
+        sop_uid=sop_uid,
+        series_number=1,
+        instance_number=1,
+        patient_name="PatientA",
+    )
+    # B: identical to A
+    shutil.copy2(input_root / "a.dcm", input_root / "b.dcm")
+
+    # C: same SOPInstanceUID, different content
+    write_dicom(
+        input_root / "c.dcm",
+        series_uid=series_uid,
+        sop_uid=sop_uid,
+        series_number=1,
+        instance_number=1,
+        patient_name="PatientC",
+    )
+    # D: identical to C
+    shutil.copy2(input_root / "c.dcm", input_root / "d.dcm")
+
+    res = run(OrganizeOptions(input_root=input_root, output_root=output_root))
+    assert res.status == "completed"
+    assert len(res.items) == 2  # Only A and C are organized, not D!
+    assert res.stats["duplicate_conflicts"] == 1
+    assert res.stats["skip_duplicate_identical"] == 2
+
+    with (output_root / "file_report.csv").open(encoding="utf-8-sig", newline="") as h:
+        rows = {r["SourceFileName"]: r for r in csv.DictReader(h)}
+
+    assert rows["a.dcm"]["Status"] == "organized"
+    assert rows["a.dcm"]["DuplicateOf"] == "N/A"
+
+    assert rows["b.dcm"]["Status"] == "skipped"
+    assert rows["b.dcm"]["Reason"] == "duplicate_identical"
+    assert rows["b.dcm"]["DuplicateOf"] == "a.dcm"
+
+    assert rows["c.dcm"]["Status"] == "organized"
+    assert rows["c.dcm"]["Reason"] == "duplicate_conflict"
+    assert rows["c.dcm"]["DuplicateOf"] == "a.dcm"
+
+    # D must match C, NOT re-copied!
+    assert rows["d.dcm"]["Status"] == "skipped"
+    assert rows["d.dcm"]["Reason"] == "duplicate_identical"
+    assert rows["d.dcm"]["DuplicateOf"] == "c.dcm"
+
+
+def test_organize_result_summary_status_r3(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "img.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+    )
+
+    # 1. Normal run
+    res_completed = run(OrganizeOptions(input_root=input_root, output_root=output_root / "out1"))
+    assert res_completed.status == "completed"
+    assert res_completed.summary["status"] == "completed"
+
+    # 2. Dry run
+    res_dry = run(OrganizeOptions(input_root=input_root, output_root=output_root / "out2", dry_run=True))
+    assert res_dry.status == "dry_run"
+    assert res_dry.summary["status"] == "dry_run"
+
+    # 3. Cancelled run
+    cancel_evt = threading.Event()
+    cancel_evt.set()
+    res_cancelled = run(
+        OrganizeOptions(input_root=input_root, output_root=output_root / "out3"),
+        cancel_event=cancel_evt,
+    )
+    assert res_cancelled.status == "cancelled"
+    assert res_cancelled.summary["status"] == "cancelled"
+
+
+def test_dry_run_existing_output_conflict_r4(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "img.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+    )
+
+    # First do a real run so output files exist
+    res_real = run(OrganizeOptions(input_root=input_root, output_root=output_root))
+    assert res_real.status == "completed"
+
+    # Now do a dry-run with if_exists="error" on the same output directory
+    res_dry = run(OrganizeOptions(input_root=input_root, output_root=output_root, dry_run=True, if_exists="error"))
+    assert res_dry.status == "dry_run"
+    assert res_dry.stats["existing_output_conflicts"] == 1
+    assert res_dry.summary["existing_output_conflicts"] == 1
+    assert any("--if-exists skip" in w for w in res_dry.warnings)
+    colliding_rec = next(r for r in res_dry.file_records if r.source.name == "img.dcm")
+    assert colliding_rec.status == "planned"
+    assert "already exists" in colliding_rec.detail
+
+
+def test_duplicate_sha256_recorded_without_checksum_r5(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+
+    sop_uid = generate_uid()
+    series_uid = generate_uid()
+
+    write_dicom(
+        input_root / "a.dcm",
+        series_uid=series_uid,
+        sop_uid=sop_uid,
+        series_number=1,
+        instance_number=1,
+        patient_name="PatientA",
+    )
+    shutil.copy2(input_root / "a.dcm", input_root / "b.dcm")
+    write_dicom(
+        input_root / "other.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=2,
+        instance_number=1,
+    )
+
+    res = run(OrganizeOptions(input_root=input_root, output_root=output_root, checksum=False))
+    assert res.status == "completed"
+
+    with (output_root / "file_report.csv").open(encoding="utf-8-sig", newline="") as h:
+        rows = {r["SourceFileName"]: r for r in csv.DictReader(h)}
+
+    # A and B were involved in duplicate detection -> both must have SHA256 recorded
+    assert rows["a.dcm"]["SHA256"] != "N/A"
+    assert len(rows["a.dcm"]["SHA256"]) == 64
+    assert rows["b.dcm"]["SHA256"] == rows["a.dcm"]["SHA256"]
+
+    # other.dcm had no duplicates and checksum=False -> SHA256 must be N/A
+    assert rows["other.dcm"]["SHA256"] == "N/A"
+
+
+def test_limit_read_progress_r6(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+
+    for idx in range(1, 4):
+        write_dicom(
+            input_root / f"img_{idx}.dcm",
+            series_uid=generate_uid(),
+            sop_uid=generate_uid(),
+            series_number=idx,
+            instance_number=1,
+        )
+
+    events: list[ProgressEvent] = []
+    run(
+        OrganizeOptions(input_root=input_root, output_root=output_root, limit=1),
+        progress=events.append,
+    )
+
+    read_events = [e for e in events if e.stage == "read"]
+    assert read_events
+    final_read = read_events[-1]
+    assert final_read.done == 1
+    assert final_read.total == 1
+    assert "limit" in final_read.message.lower()
+
+
+def test_copy_progress_no_duplicates_r7(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+
+    for idx in range(1, 3):
+        write_dicom(
+            input_root / f"img_{idx}.dcm",
+            series_uid=generate_uid(),
+            sop_uid=generate_uid(),
+            series_number=idx,
+            instance_number=1,
+        )
+
+    events: list[ProgressEvent] = []
+    run(
+        OrganizeOptions(input_root=input_root, output_root=output_root),
+        progress=events.append,
+    )
+
+    copy_events = [e for e in events if e.stage == "copy"]
+    finished_copy_events = [e for e in copy_events if e.total is not None and e.done == e.total and e.total > 0]
+    assert len(finished_copy_events) == 1
+    assert finished_copy_events[0].message == "Copy completed"
+
+
+def test_file_report_sorted_by_source_filename_r11(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+
+    write_dicom(
+        input_root / "z_image.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+    )
+    write_dicom(
+        input_root / "a_image.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=2,
+        instance_number=1,
+    )
+    (input_root / ".hidden_file").write_bytes(b"some content")
+
+    run(OrganizeOptions(input_root=input_root, output_root=output_root, include_hidden=False))
+    with (output_root / "file_report.csv").open(encoding="utf-8-sig", newline="") as h:
+        rows = list(csv.DictReader(h))
+
+    source_names = [r["SourceFileName"] for r in rows]
+    assert source_names == sorted(source_names)
+    assert source_names[0] == ".hidden_file"
+
+
 
 
 

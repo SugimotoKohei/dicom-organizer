@@ -166,6 +166,87 @@ series are joined with `|` in `series_summary.csv`.
 These counts use the same profile filter as the CSV writer, so CLI output, GUI
 logs, CSV files, and `organize_summary.json` describe the same selection.
 
+## File Report (`file_report.csv`)
+
+`file_report.csv` is written directly under the output root directory (`organized/file_report.csv`) in UTF-8 with BOM (`utf-8-sig`). Each row represents one candidate file encountered during scanning (or an excluded hidden file), providing traceability between source files and organized outputs.
+
+### Columns
+
+1. `SourceFileName`: Relative path from the input root directory (POSIX format).
+2. `Status`: Processing outcome status:
+   - `organized`: File successfully organized in non-dry-run mode.
+   - `planned`: File planned for organization during a dry run.
+   - `skipped`: File skipped without being organized.
+   - `not_processed`: Planned file that was not placed due to cancellation, interruption, or failure.
+3. `Reason`: Reason code explaining `skipped` or `not_processed` status (or `duplicate_conflict` for organized files with colliding SOPInstanceUIDs). `N/A` for normal organized files.
+4. `Detail`: Short explanation in English, or `N/A`. In dry-run mode with `--if-exists error`, notes if destination already exists in output folder.
+5. `OrganizedFileName`: Relative path from the output root directory (POSIX format), or `N/A`.
+6. `DuplicateOf`: Relative path of the first encountered source file sharing the same SOPInstanceUID (or first matching identical file for duplicate copies), or `N/A`.
+7. `SOPInstanceUID`: SOP Instance UID from the DICOM header, or `N/A`.
+8. `SeriesUID`: Series Instance UID from the DICOM header, or `N/A`.
+9. `Modality`: Modality from the DICOM header, or `N/A`.
+10. `SizeBytes`: File size in bytes, or `N/A`.
+11. `SHA256`: SHA-256 hex digest when `--checksum` is enabled or computed during duplicate detection (recorded for both duplicates and the first-encountered matching file), otherwise `N/A`.
+
+### Skip Reason Codes (`SKIP_REASONS`)
+
+| Reason Code | Meaning |
+|---|---|
+| `not_dicom` | Not a DICOM file (excluded from organization). |
+| `dicomdir` | DICOMDIR index file (media index; excluded from organization). |
+| `missing_required_uid` | DICOM object lacking `SeriesInstanceUID` or `SOPInstanceUID`. |
+| `read_error` | DICOM header/prefix detected but could not be parsed (suspected corruption). |
+| `permission_denied` | Read permission denied by OS. |
+| `io_error` | Other OS-level I/O read error. |
+| `excluded_hidden` | Hidden file (name starting with `.`) excluded without `--include-hidden`. |
+| `duplicate_identical` | Second or later instance of the same SOPInstanceUID with identical content (not copied). |
+| `existing_output` | Destination file already exists and was preserved under `--if-exists skip`. |
+
+For files that are organized despite a shared SOPInstanceUID (content differs), `Reason` is set to `duplicate_conflict`. For unplaced files upon termination, `Reason` is set to `cancelled`, `interrupted`, or `failed`.
+
+## Summary JSON (`organize_summary.json`)
+
+`organize_summary.json` contains run metadata and counts with schema version 2 (`output_schema_version: 2`). Note that dry-run mode does not write `organize_summary.json` to disk (it only returns an in-memory `OrganizeResult` with `status="dry_run"`):
+
+- `status`: Lifecycle status of the run:
+  - `completed`: Successfully organized all planned files.
+  - `running`: Processing in progress.
+  - `cancelled`: Cancelled gracefully via cancel event or API.
+  - `interrupted`: Interrupted via keyboard signal (`SIGINT` / Ctrl+C).
+  - `failed`: Failed due to an unhandled exception or integrity error.
+- `error`: Error message if status is `failed`, otherwise `null`.
+- `software`: Environment metadata including versions of `dicom-organizer`, Python, `pydicom`, and OS platform (`platform.platform()`).
+- `options`: Normalized dictionary of all run options.
+- `planned_files`: Total files planned for organization.
+- `organized_files`: Number of files successfully placed in the destination.
+- `not_processed_files`: Number of planned files that were not placed due to interruption or failure.
+- `skipped_by_reason`: Mapping of reason codes to skipped file counts.
+- `skipped_non_dicom`: Count of files with `not_dicom` reason only.
+- `duplicate_conflicts`: Count of duplicate SOPInstanceUID files with conflicting content.
+- `existing_output_conflicts`: Count of planned files whose destination already exists during dry-run with `--if-exists error`.
+- `excluded_directories`: List of directories pruned during scan with their relative paths and reasons (`hidden`, `organized`, `output_root`).
+- `space_check`: Result of disk space pre-check (`checked`, `required_bytes`, `free_bytes`).
+- `previous_run_status`: Status of an unfinished previous run detected in the output root, or `null`.
+- `warnings`: Warning messages, including guidance to resume incomplete runs and warnings when `--if-exists error` dry-run encounters existing files.
+- `reports`: List of relative paths for all generated reports and summary files.
+
+### Resuming Incomplete Runs
+
+If a run is cancelled, interrupted, or fails partway through, placed files and partial metadata tables are safely preserved. To resume and complete the remaining files, re-run with:
+
+```bash
+dicom-organizer <INPUT> -o <OUTPUT> --if-exists skip
+```
+
+### Understanding File Counts
+
+- `organized_files`: Total files placed into the organized directory structure.
+- `csv_target_files`: Subset of organized files that are supported images matching the active profile and listed in `dicom_parameters.csv`.
+- `skipped_by_reason`: Files found in the input tree that were not organized, classified by specific skip reasons.
+
+> [!NOTE]
+> **Scope of Verification**: Counts and reports reflect only the files discovered in the specified input directory. `dicom-organizer` cannot verify whether the input dataset itself is complete (i.e. whether any slices were omitted before organization) without external acquisition logs.
+
 ## 日本語
 
 この文書は `dicom-organizer` が出力するCSVファイルの仕様です。
@@ -315,3 +396,84 @@ profileでは、そのprofileに一致する行だけを出力し、そのprofil
 
 これらの件数はCSV writerと同じprofile filterで計算されるため、CLI出力、GUIログ、
 CSVファイル、`organize_summary.json` は同じ選択範囲を表します。
+
+## ファイル一覧レポート (`file_report.csv`)
+
+`file_report.csv` は出力ルート直下（`organized/file_report.csv`）に UTF-8 BOM 付き（`utf-8-sig`）で出力されます。走査で見つかったすべての候補ファイル（および除外された隠しファイル）が 1 行ずつ記録され、元ファイルと出力先の対応およびスキップ理由を完全に追跡できます。
+
+### 列構成
+
+1. `SourceFileName`: 入力ルートからの相対パス（POSIX 形式）。
+2. `Status`: 処理ステータス:
+   - `organized`: 実際に配置が完了したファイル。
+   - `planned`: dry-run で配置予定のファイル。
+   - `skipped`: 整理対象外としてスキップされたファイル。
+   - `not_processed`: 中断や失敗により配置されなかった予定ファイル。
+3. `Reason`: スキップ理由または未処理理由（理由コード）。通常配置されたファイルは `N/A`、SOPInstanceUID 重複かつ内容相違の場合は `duplicate_conflict`。
+4. `Detail`: 英語による補足説明（欠損時は `N/A`）。`--if-exists error` の dry-run では、出力先に既に存在する予定ファイルにその旨が記録されます。
+5. `OrganizedFileName`: 出力ルートからの相対パス（POSIX 形式、未配置時は `N/A`）。
+6. `DuplicateOf`: 同一 SOPInstanceUID を持つ 1 件目ファイルの入力相対パス（または同一内容の最初のファイルの相対パス、非重複時は `N/A`）。
+7. `SOPInstanceUID`: DICOM ヘッダーの SOP Instance UID（欠損時は `N/A`）。
+8. `SeriesUID`: DICOM ヘッダーの Series Instance UID（欠損時は `N/A`）。
+9. `Modality`: DICOM ヘッダーのモダリティ（欠損時は `N/A`）。
+10. `SizeBytes`: ファイルサイズ（バイト単位、欠損時は `N/A`）。
+11. `SHA256`: `--checksum` 指定時、または重複比較時に計算された SHA-256 ハッシュ（重複行および比較元の 1 件目ファイル行の両方に記録。未計算時は `N/A`）。
+
+### 未処理理由コード (`SKIP_REASONS`)
+
+| 理由コード | 意味 |
+|---|---|
+| `not_dicom` | DICOM ではないファイル（整理対象外） |
+| `dicomdir` | DICOMDIR（メディア索引ファイル。整理対象外） |
+| `missing_required_uid` | DICOM だが `SeriesInstanceUID` または `SOPInstanceUID` がない（必須情報不足） |
+| `read_error` | DICOM プレフィックス等の形跡があるが読めない（破損疑い） |
+| `permission_denied` | OS の読み取り権限がない |
+| `io_error` | その他の OS レベルの読み取りエラー |
+| `excluded_hidden` | 隠しファイル（`.` で始まる）で `--include-hidden` なしのため除外 |
+| `duplicate_identical` | 同じ SOPInstanceUID で内容も完全に同一な 2 件目以降のファイル（配置しない） |
+| `existing_output` | 出力先に同名ファイルが既に存在し、`--if-exists skip` により残された |
+
+SOPInstanceUID が同じで内容が異なるファイルは、重複衝突（`duplicate_conflict`）として配置されます。中断・停止時に未配置だった予定ファイルには、理由コードとして `cancelled` / `interrupted` / `failed` が記録されます。
+
+## 実行サマリー (`organize_summary.json`)
+
+`organize_summary.json` には、実行環境や結果の集計値がスキーマ版 2（`output_schema_version: 2`）として記録されます。なお、dry-run は `organize_summary.json` をディスクに書き出さず、`OrganizeResult.status` のみが `dry_run` となります:
+
+- `status`: 実行の最終状態:
+  - `completed`: すべての配置が正常に完了。
+  - `running`: 実行中。
+  - `cancelled`: キャンセル要求により安全に中断。
+  - `interrupted`: Ctrl+C（`SIGINT`）により中断。
+  - `failed`: 例外や整合性エラーにより失敗。
+- `error`: `status` が `failed` の場合のエラーメッセージ（正常時は `null`）。
+- `software`: `dicom-organizer` のバージョン、Python、`pydicom`、OS プラットフォーム情報（`platform.platform()`）。
+- `options`: 実行時に適用された正規化済み全オプション。
+- `planned_files`: 配置予定ファイル総数。
+- `organized_files`: **実際に配置が完了したファイル数**。
+- `not_processed_files`: 中断・失敗により配置されなかったファイル数。
+- `skipped_by_reason`: 理由コード別のスキップ件数マップ。
+- `skipped_non_dicom`: `not_dicom`（非 DICOM）のみの件数。
+- `duplicate_conflicts`: 内容が異なる SOPInstanceUID 重複ファイルの件数。
+- `existing_output_conflicts`: `--if-exists error` の dry-run で出力先に既に存在していた予定ファイル件数。
+- `excluded_directories`: 走査で刈り込まれたディレクトリの一覧（相対パスと理由 `hidden` / `organized` / `output_root`）。
+- `space_check`: 空き容量チェック結果（`checked`、`required_bytes`、`free_bytes`）。
+- `previous_run_status`: 出力先に残されていた未完了実行のステータス（未検出時は `null`）。
+- `warnings`: 未完了実行の検出、および既存出力先に対する `--if-exists error` の dry-run での警告・再開案内メッセージ。
+- `reports`: 出力された全レポート・サマリーファイルの出力ルート相対パス一覧。
+
+### 中断・失敗した処理の再開方法
+
+処理が途中で中断（Ctrl+C やキャンセル）または失敗した場合でも、配置済みのファイルと中間レポートは安全に保持されます。続きから処理を再開するには、`--if-exists skip` を指定して再実行してください:
+
+```bash
+dicom-organizer <INPUT> -o <OUTPUT> --if-exists skip
+```
+
+### 件数の違いについて
+
+- `organized_files`: 出力先フォルダに実際に整理・配置されたファイル総数。
+- `csv_target_files`: 整理されたファイルのうち、指定プロファイルに合致し `dicom_parameters.csv` に掲載された画像ファイル数。
+- `skipped_by_reason`: 入力フォルダ内で発見されたが、整理されなかったファイルの理由別内訳。
+
+> [!NOTE]
+> **確認できる範囲の注意点**: 記録される結果は、指定された入力フォルダ内に現実に存在したファイルについてのものです。検査全体として本来あるべき画像がすべて揃っているか（撮像装置側からの転送漏れや欠落がないか）は、検査プロトコルの予定枚数や外部情報と照合しない限りツール単体では保証できません。

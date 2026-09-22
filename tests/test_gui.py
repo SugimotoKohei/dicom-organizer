@@ -925,8 +925,10 @@ def test_j7_j8_font_scale_and_form_growth(tmp_path: Path) -> None:
 
 
 def test_k1_secondary_text_contrast_and_palette_change(tmp_path: Path) -> None:
-    """K1: Verify secondary text contrast >= 4.5 in dark mode and palette change handling."""
+    """K1: Verify secondary text contrast >= 4.5 in light/dark palettes and palette change handling."""
     app = _qt_app()
+    from collections import Counter
+
     from PySide6.QtCore import QEvent, QPoint, QRect, QSettings
     from PySide6.QtGui import QColor, QPalette
     from PySide6.QtWidgets import QLabel
@@ -936,66 +938,117 @@ def test_k1_secondary_text_contrast_and_palette_change(tmp_path: Path) -> None:
     source = Path(gui.__file__).read_text(encoding="utf-8")
     assert "palette(placeholder-text)" not in source
 
-    dark_palette = QPalette()
     roles = QPalette.ColorRole
-    for role, rgb in (
-        (roles.Window, (50, 50, 50)),
-        (roles.WindowText, (230, 230, 230)),
-        (roles.Base, (30, 30, 30)),
-        (roles.AlternateBase, (40, 40, 40)),
-        (roles.Text, (230, 230, 230)),
-        (roles.Button, (80, 80, 80)),
-        (roles.ButtonText, (230, 230, 230)),
-        (roles.PlaceholderText, (92, 92, 92)),
-        (roles.Mid, (70, 70, 70)),
-        (roles.Dark, (35, 35, 35)),
-        (roles.Light, (110, 110, 110)),
-        (roles.Highlight, (0, 100, 220)),
-        (roles.HighlightedText, (255, 255, 255)),
-    ):
-        dark_palette.setColor(role, QColor(*rgb))
+    dark_colors = {
+        roles.Window: (50, 50, 50),
+        roles.WindowText: (230, 230, 230),
+        roles.Base: (30, 30, 30),
+        roles.AlternateBase: (40, 40, 40),
+        roles.Text: (230, 230, 230),
+        roles.Button: (80, 80, 80),
+        roles.ButtonText: (230, 230, 230),
+        roles.PlaceholderText: (92, 92, 92),
+        roles.Mid: (70, 70, 70),
+        roles.Dark: (35, 35, 35),
+        roles.Light: (110, 110, 110),
+        roles.Highlight: (0, 100, 220),
+        roles.HighlightedText: (255, 255, 255),
+    }
+    light_colors = {
+        roles.Window: (248, 249, 250),
+        roles.WindowText: (25, 30, 36),
+        roles.Base: (255, 255, 255),
+        roles.AlternateBase: (243, 244, 246),
+        roles.Text: (25, 30, 36),
+        roles.Button: (240, 242, 245),
+        roles.ButtonText: (25, 30, 36),
+        roles.PlaceholderText: (120, 120, 120),
+        roles.Mid: (200, 200, 200),
+        roles.Dark: (160, 160, 160),
+        roles.Light: (255, 255, 255),
+        roles.Highlight: (10, 102, 194),
+        roles.HighlightedText: (255, 255, 255),
+    }
 
     orig_palette = app.palette()
     try:
-        app.setPalette(dark_palette)
-        window = gui.MainWindow(
-            settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat),
-            language="ja",
-        )
-        window.resize(1280, 860)
-        try:
-            window.show()
-            app.processEvents()
+        for pal_name, color_map in (("dark", dark_colors), ("light", light_colors)):
+            palette = QPalette()
+            for role, rgb in color_map.items():
+                palette.setColor(role, QColor(*rgb))
 
-            start = window.stack.widget(0)
-            labels = [lab for lab in start.findChildren(QLabel) if lab.text().strip() and not lab.isHidden()]
-            assert labels
+            app.setPalette(palette)
+            settings_path = str(tmp_path / f"settings_{pal_name}.ini")
+            window = gui.MainWindow(
+                settings=QSettings(settings_path, QSettings.Format.IniFormat),
+                language="ja",
+            )
+            window.resize(1280, 860)
+            try:
+                window.show()
+                app.processEvents()
 
-            from collections import Counter
+                # Verify rendered card background matches computed background,
+                # and contrast_ratio of specified label colors against card background >= 4.5.
+                for task, card in window.task_buttons.items():
+                    expected_bg = card.card_background_color(palette, state="normal")
 
-            for lab in labels:
-                container = lab.parentWidget()
-                rect = QRect(lab.mapTo(container, QPoint(0, 0)), lab.size())
-                image = container.grab(rect).toImage()
-                colors: Counter[int] = Counter()
-                for y in range(image.height()):
-                    for x in range(0, image.width(), 2):
-                        colors[image.pixel(x, y) & 0xFFFFFF] += 1
-                bg = QColor(colors.most_common(1)[0][0])
-                lb = gui.relative_luminance(bg)
-                best = 1.0
-                for rgb in colors:
-                    lp = gui.relative_luminance(QColor(rgb))
-                    best = max(best, (max(lp, lb) + 0.05) / (min(lp, lb) + 0.05))
-                assert best >= 4.5, f"Label '{lab.text()[:15]}' contrast {best:.2f} < 4.5"
+                    card_image = card.grab().toImage()
+                    counter: Counter[int] = Counter()
+                    for y in range(card_image.height()):
+                        for x in range(0, card_image.width(), 2):
+                            counter[card_image.pixel(x, y) & 0xFFFFFF] += 1
+                    rendered_bg = QColor(counter.most_common(1)[0][0])
+                    assert rendered_bg == expected_bg, (
+                        f"{pal_name} {task}: rendered bg {rendered_bg.name()} != "
+                        f"expected {expected_bg.name()}"
+                    )
 
-            # Verify dynamic palette change updates
-            orig_card_color = window.task_buttons["list"].title_label.styleSheet()
-            window.changeEvent(QEvent(QEvent.Type.PaletteChange))
-            new_card_color = window.task_buttons["list"].title_label.styleSheet()
-            assert new_card_color == orig_card_color
-        finally:
-            window.close()
+                    for label, kind in (
+                        (card.title_label, "title"),
+                        (card.description_label, "description"),
+                    ):
+                        ss = label.styleSheet()
+                        assert "color:" in ss
+                        color_hex = ss.split("color:")[1].split(";")[0].strip()
+                        label_color = QColor(color_hex)
+                        ratio = gui.contrast_ratio(label_color, expected_bg)
+                        assert ratio >= 4.5, (
+                            f"{pal_name} {task} {kind}: contrast {ratio:.2f} < 4.5 "
+                            f"({color_hex} on {expected_bg.name()})"
+                        )
+
+                # Pixel-based check for all start page labels
+                start = window.stack.widget(0)
+                labels = [
+                    lab for lab in start.findChildren(QLabel) if lab.text().strip() and not lab.isHidden()
+                ]
+                assert labels
+
+                for lab in labels:
+                    container = lab.parentWidget()
+                    rect = QRect(lab.mapTo(container, QPoint(0, 0)), lab.size())
+                    image = container.grab(rect).toImage()
+                    colors: Counter[int] = Counter()
+                    for y in range(image.height()):
+                        for x in range(0, image.width(), 2):
+                            colors[image.pixel(x, y) & 0xFFFFFF] += 1
+                    bg = QColor(colors.most_common(1)[0][0])
+                    lb = gui.relative_luminance(bg)
+                    best = 1.0
+                    for rgb in colors:
+                        lp = gui.relative_luminance(QColor(rgb))
+                        best = max(best, (max(lp, lb) + 0.05) / (min(lp, lb) + 0.05))
+                    assert best >= 4.5, f"[{pal_name}] Label '{lab.text()[:15]}' contrast {best:.2f} < 4.5"
+
+                if pal_name == "dark":
+                    # Verify dynamic palette change updates
+                    orig_card_color = window.task_buttons["list"].title_label.styleSheet()
+                    window.changeEvent(QEvent(QEvent.Type.PaletteChange))
+                    new_card_color = window.task_buttons["list"].title_label.styleSheet()
+                    assert new_card_color == orig_card_color
+            finally:
+                window.close()
     finally:
         app.setPalette(orig_palette)
 

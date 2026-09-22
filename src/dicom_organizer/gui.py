@@ -21,6 +21,7 @@ try:
         QLocale,
         QObject,
         QPoint,
+        QRectF,
         QSettings,
         QSize,
         Qt,
@@ -29,7 +30,19 @@ try:
         QUrl,
         Signal,
     )
-    from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QKeySequence, QPaintEvent, QPalette, QShortcut
+    from PySide6.QtGui import (
+        QAction,
+        QBrush,
+        QColor,
+        QDesktopServices,
+        QFont,
+        QKeySequence,
+        QPaintEvent,
+        QPainter,
+        QPalette,
+        QPen,
+        QShortcut,
+    )
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -79,6 +92,7 @@ except ImportError as exc:
     QLocale = _MissingQt
     QObject = _MissingQt
     QPoint = _MissingQt
+    QRectF = _MissingQt
     QSettings = _MissingQt
     QSize = _MissingQt
     Qt = _MissingQt
@@ -87,12 +101,15 @@ except ImportError as exc:
     QUrl = _MissingQt
     Signal = _MissingQt
     QAction = _MissingQt
+    QBrush = _MissingQt
     QColor = _MissingQt
     QDesktopServices = _MissingQt
     QFont = _MissingQt
     QKeySequence = _MissingQt
     QPaintEvent = _MissingQt
+    QPainter = _MissingQt
     QPalette = _MissingQt
+    QPen = _MissingQt
     QShortcut = _MissingQt
     QApplication = _MissingQt
     QCheckBox = _MissingQt
@@ -166,17 +183,22 @@ def blend_colors(fg: QColor, bg: QColor, fg_ratio: float) -> QColor:
 def compute_secondary_text_color(
     palette: QPalette,
     fg_role: QPalette.ColorRole = QPalette.ColorRole.WindowText,
-    bg_role: QPalette.ColorRole = QPalette.ColorRole.Window,
+    bg_role: QPalette.ColorRole | QColor = QPalette.ColorRole.Window,
     min_contrast: float = 4.8,
 ) -> QColor:
     """Compute secondary text color by blending fg and bg, ensuring contrast >= min_contrast."""
     fg = palette.color(fg_role)
-    bg = palette.color(bg_role)
+    if isinstance(bg_role, QColor):
+        bg = bg_role
+    else:
+        bg = palette.color(bg_role)
     ratio = 0.70
     color = blend_colors(fg, bg, ratio)
     while contrast_ratio(color, bg) < min_contrast and ratio < 0.98:
         ratio += 0.02
         color = blend_colors(fg, bg, ratio)
+    if contrast_ratio(color, bg) < min_contrast and contrast_ratio(fg, bg) >= min_contrast:
+        color = fg
     return color
 
 
@@ -219,23 +241,65 @@ class TaskCard(QPushButton):
         self._layout.addWidget(self.title_label)
         self._layout.addWidget(self.description_label)
 
-    def update_palette_colors(self, palette: QPalette | None = None) -> None:
-        """Update title and description colors dynamically based on current palette (K1)."""
+    def card_background_color(
+        self,
+        palette: QPalette | None = None,
+        state: str | None = None,
+    ) -> QColor:
+        """Compute card background color from palette for given or current state."""
         pal = palette or self.palette()
-        btn_bg = pal.color(QPalette.ColorRole.Button)
+        base_bg = pal.color(QPalette.ColorRole.Button)
+        light_color = pal.color(QPalette.ColorRole.Light)
+        dark_color = pal.color(QPalette.ColorRole.Dark)
+        window_bg = pal.color(QPalette.ColorRole.Window)
+
+        if state is None:
+            if not self.isEnabled():
+                state = "disabled"
+            elif self.isDown():
+                state = "pressed"
+            elif self.underMouse():
+                state = "hover"
+            else:
+                state = "normal"
+
+        if state == "disabled":
+            return blend_colors(window_bg, base_bg, 0.5)
+        if state == "pressed":
+            return blend_colors(dark_color, base_bg, 0.15)
+        if state == "hover":
+            return blend_colors(light_color, base_bg, 0.15)
+        return base_bg
+
+    def update_palette_colors(self, palette: QPalette | None = None) -> None:
+        """Update title and description colors dynamically based on card background (K1)."""
+        pal = palette or self.palette()
+        card_bg = self.card_background_color(pal, state="normal")
         btn_fg = pal.color(QPalette.ColorRole.ButtonText)
-        is_dark = relative_luminance(btn_bg) < 0.5
+        is_dark = relative_luminance(card_bg) < 0.5
 
         if is_dark:
-            # In dark mode, Fusion button gradient is lighter at the top than Button role.
-            # Pure white guarantees >= 4.5 contrast for title, and btn_fg guarantees >= 4.5 for desc.
-            title_color = QColor(255, 255, 255)
-            desc_color = btn_fg
+            white = QColor(255, 255, 255)
+            title_color = white if contrast_ratio(white, card_bg) >= 4.5 else btn_fg
+            desc_color = compute_secondary_text_color(
+                pal,
+                fg_role=QPalette.ColorRole.ButtonText,
+                bg_role=card_bg,
+                min_contrast=4.8,
+            )
         else:
             title_color = btn_fg
             desc_color = compute_secondary_text_color(
-                pal, QPalette.ColorRole.ButtonText, QPalette.ColorRole.Button
+                pal,
+                fg_role=QPalette.ColorRole.ButtonText,
+                bg_role=card_bg,
+                min_contrast=4.8,
             )
+
+        if contrast_ratio(title_color, card_bg) < 4.5:
+            title_color = btn_fg
+        if contrast_ratio(desc_color, card_bg) < 4.5:
+            desc_color = btn_fg
 
         self.title_label.setStyleSheet(f"QLabel {{ color: {title_color.name()}; }}")
         self.description_label.setStyleSheet(f"QLabel {{ color: {desc_color.name()}; }}")
@@ -271,12 +335,50 @@ class TaskCard(QPushButton):
         d_font.setPointSizeF(base_size)
         self.description_label.setFont(d_font)
 
+    def enterEvent(self, event: Any) -> None:
+        super().enterEvent(event)
+        self.update()
+
+    def leaveEvent(self, event: Any) -> None:
+        super().leaveEvent(event)
+        self.update()
+
+    def focusInEvent(self, event: Any) -> None:
+        super().focusInEvent(event)
+        self.update()
+
+    def focusOutEvent(self, event: Any) -> None:
+        super().focusOutEvent(event)
+        self.update()
+
     def paintEvent(self, event: QPaintEvent) -> None:
-        opt = QStyleOptionButton()
-        self.initStyleOption(opt)
-        opt.text = ""
-        painter = QStylePainter(self)
-        painter.drawControl(QStyle.ControlElement.CE_PushButton, opt)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        radius = 6.0
+
+        bg_color = self.card_background_color()
+        painter.setBrush(QBrush(bg_color))
+
+        pal = self.palette()
+        if self.hasFocus():
+            border_color = pal.color(QPalette.ColorRole.Highlight)
+            pen = QPen(border_color, 2.0)
+            rect = rect.adjusted(0.5, 0.5, -0.5, -0.5)
+        elif self.underMouse() and self.isEnabled():
+            border_color = blend_colors(
+                pal.color(QPalette.ColorRole.Highlight),
+                pal.color(QPalette.ColorRole.Mid),
+                0.4,
+            )
+            pen = QPen(border_color, 1.0)
+        else:
+            border_color = pal.color(QPalette.ColorRole.Mid)
+            pen = QPen(border_color, 1.0)
+
+        painter.setPen(pen)
+        painter.drawRoundedRect(rect, radius, radius)
 
     def sizeHint(self) -> QSize:
         return self._layout.sizeHint()

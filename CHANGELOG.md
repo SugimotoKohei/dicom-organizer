@@ -8,6 +8,16 @@ occur, but they should be documented here.
 
 ## 0.2.0 - Unreleased
 
+- Redesign the PySide6 GUI around a task-oriented first-time experience (`src/dicom_organizer/gui.py`), featuring a stacked start screen with 3 clear goals: "List imaging parameters" (`list`, `list_only=True`), "Copy and organize" (`organize`, `action="copy"`), and "Preview before organizing" (`preview`, `dry_run=True`), along with instant synthetic sample dataset testing.
+- Add internationalization module (`src/dicom_organizer/i18n.py`) providing full Japanese and English localization for all GUI elements, friendly skip/status reason labels and explanations, and staged progress messages.
+- Add an always-visible patient information notice panel in the GUI dynamically reflecting `patient_data_notices()`, making retained identifiers and lack of DICOM modification transparent across `keep`, `hash`, and `drop` modes.
+- Support folder and file drag-and-drop anywhere onto the GUI window, automatic destination folder derivation (`organized_list` or `organized`), and manual destination override preservation.
+- Add worker-thread execution with throttled progress updates, determinate/indeterminate progress bar, graceful cancellation (`threading.Event`), and one-click resume (`--if-exists skip`) for interrupted or cancelled runs.
+- Enhance GUI results display with 1-sentence plain-language conclusions (accurately reflecting CSV target images and image series in list-only/preview modes), categorized skip/unhandled reason table, series preview table, quick-open folder/CSV buttons, and seamless transition from preview to execution.
+- Refine GUI styling for dark mode support (guaranteeing >= 4.5 contrast ratios on color-coded panels, action bars, and secondary labels/card texts via dynamically computed palette blend colors), eliminate placeholder-text reliance for dim text, eliminate pixel-fixed font sizes to fully support dynamic font scaling, ensure full word-wrapping in counts tables, and enforce expanding form fields on macOS.
+- Add GUI menu support for configuration file import/export (`load_config` / `config_to_toml`), instant language switching (Japanese / English), font scaling (Normal / Large 1.25x), interactive glossary dialog, in-app self-test execution, and sanitized diagnostics export to clipboard.
+- Support headless CLI flags in `gui.main()` (`--self-test`, `--self-test-report`, `--version`, `--diagnostics`, `--help`) without instantiating windows.
+- Rewrite `tests/test_gui.py` covering 13 comprehensive test scenarios in offscreen mode with strict `DICOM_ORGANIZER_REQUIRE_GUI=1` enforcement.
 - Add column dictionary and machine-readable schema (`src/dicom_organizer/columns.py`, `ColumnSpec`, `COLUMN_SPECS`, `column_spec()`, and `schema_document()`) defining meanings, units, sources, levels, missing (`N/A`) conditions, profile scopes, and `absent_value` for all 100 CSV columns.
 - Add `--print-schema` CLI option to export the schema document and column conventions as formatted JSON without requiring input directories.
 - Add `scripts/generate_column_docs.py` documentation generator with `--check` mode, creating `docs/csv-columns.md` in both English and Japanese.

@@ -202,6 +202,20 @@ def compute_secondary_text_color(
     return color
 
 
+def _scaled_font(base_font: QFont, factor: float, *, bold: bool = False) -> QFont:
+    """Scale a font by a factor, preserving either point size or pixel size (G1)."""
+    font = QFont(base_font)
+    if bold:
+        font.setBold(True)
+    if base_font.pointSizeF() > 0:
+        font.setPointSizeF(base_font.pointSizeF() * factor)
+    elif base_font.pixelSize() > 0:
+        font.setPixelSize(round(base_font.pixelSize() * factor))
+    else:
+        font.setPointSizeF(12.0 * factor)
+    return font
+
+
 class TaskCard(QPushButton):
     """Card-style button with separated title and description labels (H1)."""
 
@@ -216,26 +230,15 @@ class TaskCard(QPushButton):
         self._layout.setContentsMargins(18, 14, 18, 14)
         self._layout.setSpacing(6)
 
-        app_font = QApplication.font()
-        base_size = app_font.pointSizeF()
-        if base_size <= 0:
-            base_size = 13.0
-
         self.title_label = QLabel()
         self.title_label.setWordWrap(True)
         self.title_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        title_font = QFont(app_font)
-        title_font.setBold(True)
-        title_font.setPointSizeF(base_size * 1.15)
-        self.title_label.setFont(title_font)
 
         self.description_label = QLabel()
         self.description_label.setWordWrap(True)
         self.description_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        desc_font = QFont(app_font)
-        desc_font.setPointSizeF(base_size)
-        self.description_label.setFont(desc_font)
 
+        self.update_font_sizes()
         self.update_palette_colors()
 
         self._layout.addWidget(self.title_label)
@@ -346,17 +349,8 @@ class TaskCard(QPushButton):
 
     def update_font_sizes(self) -> None:
         app_font = QApplication.font()
-        base_size = app_font.pointSizeF()
-        if base_size <= 0:
-            base_size = 13.0
-        t_font = QFont(app_font)
-        t_font.setBold(True)
-        t_font.setPointSizeF(base_size * 1.15)
-        self.title_label.setFont(t_font)
-
-        d_font = QFont(app_font)
-        d_font.setPointSizeF(base_size)
-        self.description_label.setFont(d_font)
+        self.title_label.setFont(_scaled_font(app_font, 1.15, bold=True))
+        self.description_label.setFont(_scaled_font(app_font, 1.0))
 
     def enterEvent(self, event: Any) -> None:
         super().enterEvent(event)
@@ -500,10 +494,15 @@ class MainWindow(QMainWindow):
                 self.language = i18n.default_language(system_locale)
 
         self._base_font_point_size: float = 12.0
+        self._base_font_pixel_size: int = 0
         try:
-            pt = QApplication.font().pointSizeF()
+            app_font = QApplication.font()
+            pt = app_font.pointSizeF()
+            px = app_font.pixelSize()
             if pt > 0:
                 self._base_font_point_size = pt
+            elif px > 0:
+                self._base_font_pixel_size = px
         except Exception:
             pass
 
@@ -1225,39 +1224,18 @@ class MainWindow(QMainWindow):
         self.scope_note_label.setVisible(False)
 
     def _update_label_fonts(self) -> None:
-        """Update label fonts based on base font point size (J2, J7)."""
+        """Update label fonts based on base font point or pixel size (J2, J7, G1)."""
         app_font = QApplication.font()
-        base_size = app_font.pointSizeF()
-        if base_size <= 0:
-            base_size = 12.0
 
         for btn in self.task_buttons.values():
             if hasattr(btn, "update_font_sizes"):
                 btn.update_font_sizes()
 
-        f_sum = QFont(app_font)
-        f_sum.setBold(True)
-        f_sum.setPointSizeF(base_size * 1.1)
-        self.result_summary_label.setFont(f_sum)
-
-        f_start = QFont(app_font)
-        f_start.setBold(True)
-        f_start.setPointSizeF(base_size * 1.5)
-        self.start_title_label.setFont(f_start)
-
-        f_cur = QFont(app_font)
-        f_cur.setBold(True)
-        f_cur.setPointSizeF(base_size * 1.25)
-        self.current_task_label.setFont(f_cur)
-
-        f_step3 = QFont(app_font)
-        f_step3.setBold(True)
-        f_step3.setPointSizeF(base_size * 1.05)
-        self.step3_title_label.setFont(f_step3)
-
-        f_scope = QFont(app_font)
-        f_scope.setPointSizeF(base_size * 0.9)
-        self.scope_note_label.setFont(f_scope)
+        self.result_summary_label.setFont(_scaled_font(app_font, 1.1, bold=True))
+        self.start_title_label.setFont(_scaled_font(app_font, 1.5, bold=True))
+        self.current_task_label.setFont(_scaled_font(app_font, 1.25, bold=True))
+        self.step3_title_label.setFont(_scaled_font(app_font, 1.05, bold=True))
+        self.scope_note_label.setFont(_scaled_font(app_font, 0.9))
 
     def _update_secondary_colors(self) -> None:
         """Update secondary label and card colors dynamically based on current palette (K1)."""
@@ -1303,15 +1281,16 @@ class MainWindow(QMainWindow):
         self.save_settings()
 
     def set_font_scale(self, scale: str) -> None:
-        """Switch font scale ('normal' or 'large')."""
+        """Switch font scale ('normal' or 'large') (G1)."""
         if scale not in ("normal", "large"):
             scale = "normal"
         self.font_scale = scale
         app_font = QApplication.font()
-        if scale == "large":
-            app_font.setPointSizeF(self._base_font_point_size * 1.25)
+        factor = 1.25 if scale == "large" else 1.0
+        if self._base_font_pixel_size > 0:
+            app_font.setPixelSize(round(self._base_font_pixel_size * factor))
         else:
-            app_font.setPointSizeF(self._base_font_point_size)
+            app_font.setPointSizeF(self._base_font_point_size * factor)
         QApplication.setFont(app_font)
         self._update_label_fonts()
         self.save_settings()

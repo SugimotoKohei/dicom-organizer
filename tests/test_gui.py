@@ -914,11 +914,21 @@ def test_j7_j8_font_scale_and_form_growth(tmp_path: Path) -> None:
         for layout in layouts:
             assert layout.fieldGrowthPolicy() == QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
 
+        def _font_size(font) -> float:
+            pt = font.pointSizeF()
+            if pt > 0:
+                return pt
+            px = font.pixelSize()
+            if px > 0:
+                return float(px)
+            info = QFontInfo(font)
+            return info.pointSizeF() if info.pointSizeF() > 0 else float(info.pixelSize())
+
         window.set_font_scale("normal")
-        normal_pt = QFontInfo(window.result_summary_label.font()).pointSizeF()
+        normal_size = _font_size(window.result_summary_label.font())
         window.set_font_scale("large")
-        large_pt = QFontInfo(window.result_summary_label.font()).pointSizeF()
-        assert large_pt > normal_pt
+        large_size = _font_size(window.result_summary_label.font())
+        assert large_size > normal_size
         assert window.result_summary_label.font().bold()
     finally:
         window.close()

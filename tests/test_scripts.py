@@ -199,7 +199,7 @@ def test_dcm2niix_batch_filtering_and_checks(tmp_path: Path) -> None:
     assert len(lines) == 3
 
     nifti_dir = organized.parent / f"{organized.name}_nifti"
-    rel_path = "Example-Medical_Demo-MR-3T/20260601/000002_T2"
+    rel_path = Path("Example-Medical_Demo-MR-3T") / "20260601" / "000002_T2"
     expected_cmd = [
         "dcm2niix",
         "-z",
@@ -210,7 +210,18 @@ def test_dcm2niix_batch_filtering_and_checks(tmp_path: Path) -> None:
         str(nifti_dir / rel_path),
         str(organized / rel_path),
     ]
-    parsed_commands = [shlex.split(ln) for ln in lines]
+
+    def _format_command(args: list[str]) -> str:
+        if os.name == "nt":
+            return subprocess.list2cmdline(args)
+        return " ".join(shlex.quote(a) for a in args)
+
+    assert _format_command(expected_cmd) in lines
+
+    if os.name == "nt":
+        parsed_commands = [[t.strip('"') for t in shlex.split(ln, posix=False)] for ln in lines]
+    else:
+        parsed_commands = [shlex.split(ln) for ln in lines]
     assert expected_cmd in parsed_commands
     for cmd in parsed_commands:
         target = cmd[cmd.index("-o") + 1]

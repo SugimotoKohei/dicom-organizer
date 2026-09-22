@@ -312,6 +312,51 @@ dicom-organizer <INPUT> -o <OUTPUT> --if-exists skip
 > [!NOTE]
 > **Scope of Verification**: Counts and reports reflect only the files discovered in the specified input directory. `dicom-organizer` cannot verify whether the input dataset itself is complete (i.e. whether any slices were omitted before organization) without external acquisition logs.
 
+## Enhanced and Multi-Frame Images
+
+`dicom_parameters.csv` and `series_summary.csv` include dedicated columns for multi-frame metadata:
+
+- `NumberOfFrames`: Number of frames in the DICOM object (`NumberOfFrames` attribute). `N/A` if absent.
+- `FrameVaryingAttributes`: For objects with `PerFrameFunctionalGroupsSequence`, lists the attribute columns whose values vary across frames, joined by `|` in table order. If all frames have identical values, reports `none`. If `PerFrameFunctionalGroupsSequence` is not present, reports `N/A`.
+
+### Difference Between "Reading Enhanced Values" and "Expressing Frame Variations"
+
+Earlier versions of `dicom-organizer` only inspected the first element of `SharedFunctionalGroupsSequence` or `PerFrameFunctionalGroupsSequence`. However, in Enhanced MR acquisitions (such as multi-echo, dynamic scans, or multi-orientation localizers), critical parameters like Echo Time (`TE_ms`) or patient orientation differ across frames.
+
+`dicom-organizer` represents frame-by-frame differences for the columns in the table above:
+- When an attribute is found in `SharedFunctionalGroupsSequence`, it applies to all frames and is returned as a single value.
+- When an attribute is in `PerFrameFunctionalGroupsSequence`, all frame items are inspected in frame order. If values differ across frames, distinct values are joined in frame order with `|` without duplicates (e.g. `10|20|30`).
+- If an attribute varies across frames, its column name is recorded in `FrameVaryingAttributes`.
+- If `ImageOrientationPatient` or `InPlanePhaseEncodingDirection` varies across frames, `PhaseEncodingDirectionPatient` is calculated for each frame, joined with `|` across distinct values, and appended to the end of `FrameVaryingAttributes`. Classic images and Enhanced images whose orientation does not vary retain a single value.
+
+### Functional Group Mapping Table
+
+The following columns prioritize classic top-level DICOM attributes; if absent or empty, values are retrieved from Functional Groups:
+
+| CSV Column | Classic Attribute | Functional Group Sequence | Attribute |
+|---|---|---|---|
+| `TR_ms` | `RepetitionTime` | `MRTimingAndRelatedParametersSequence` | `RepetitionTime` |
+| `FlipAngle_deg` | `FlipAngle` | `MRTimingAndRelatedParametersSequence` | `FlipAngle` |
+| `EchoTrainLength` | `EchoTrainLength` | `MRTimingAndRelatedParametersSequence` | `EchoTrainLength` |
+| `TE_ms` | `EchoTime` | `MREchoSequence` | `EffectiveEchoTime` |
+| `InversionTime_ms` | `InversionTime` | `MRModifierSequence` | `InversionTimes` |
+| `PixelBandwidth_Hz_per_px` | `PixelBandwidth` | `MRImagingModifierSequence` | `PixelBandwidth` |
+| `NumberOfAverages` | `NumberOfAverages` | `MRAveragesSequence` | `NumberOfAverages` |
+| `PixelSpacing` | `PixelSpacing` | `PixelMeasuresSequence` | `PixelSpacing` |
+| `SliceThickness_mm` | `SliceThickness` | `PixelMeasuresSequence` | `SliceThickness` |
+| `SpacingBetweenSlices_mm` | `SpacingBetweenSlices` | `PixelMeasuresSequence` | `SpacingBetweenSlices` |
+| `ImageOrientationPatient` | `ImageOrientationPatient` | `PlaneOrientationSequence` | `ImageOrientationPatient` |
+| `InPlanePhaseEncodingDirection` | `InPlanePhaseEncodingDirection` | `MRFOVGeometrySequence` | `InPlanePhaseEncodingDirection` |
+| `ParallelReductionFactorInPlane` | `ParallelReductionFactorInPlane` | `MRModifierSequence` | `ParallelReductionFactorInPlane` |
+
+### Limitations
+
+- Attributes that only exist in a subset of frames are concatenated using only the frames where values are present (frames without values are ignored).
+- In Enhanced CT, PET, XA, etc., generic columns in the table (such as `PixelSpacing`, `SliceThickness`, `SpacingBetweenSlices`, `ImageOrientationPatient`, `ImagePositionPatient`) are read from Functional Groups, but modality-specific parameters (such as `KVP` in CT) are read only from classic top-level attributes and may be reported as `N/A` in Enhanced non-MR modalities.
+- `ImagePositionPatient` uses the first frame's value from `PlanePositionSequence` when the classic attribute is absent (slice positions naturally vary and are not included in `FrameVaryingAttributes`).
+- `FOV_HxW_mm` is computed from the first resolved `PixelSpacing`.
+- `EchoTimes_ms` and `EchoCount`: In series aggregation, `TE_ms` is split by `|` before counting unique values, correctly yielding `EchoCount=3` and `EchoTimes_ms=10|20|30` for multi-echo Enhanced MR.
+
 ## 日本語
 
 この文書は `dicom-organizer` が出力するCSVファイルの仕様です。
@@ -610,3 +655,48 @@ dicom-organizer <INPUT> -o <OUTPUT> --if-exists skip
 
 > [!NOTE]
 > **確認できる範囲の注意点**: 記録される結果は、指定された入力フォルダ内に現実に存在したファイルについてのものです。検査全体として本来あるべき画像がすべて揃っているか（撮像装置側からの転送漏れや欠落がないか）は、検査プロトコルの予定枚数や外部情報と照合しない限りツール単体では保証できません。
+
+## Enhanced / マルチフレーム画像
+
+`dicom_parameters.csv` および `series_summary.csv` には、マルチフレーム画像用の共通列が含まれます。
+
+- `NumberOfFrames`: `NumberOfFrames` 属性の値。属性が存在しない場合は `N/A`。
+- `FrameVaryingAttributes`: `PerFrameFunctionalGroupsSequence` を持つオブジェクトにおいて、フレーム間で値が異なる列名をマッピング表の順に `|` で連結したもの。変動がない場合は `none`。`PerFrameFunctionalGroupsSequence` を持たないオブジェクトは `N/A`。
+
+### 「Enhanced の値を読める」と「フレームごとの違いを表現できる」の違い
+
+以前の版の `dicom-organizer` は最初の要素だけを読んでいましたが、マルチエコー（ME）や異なる向きを含むローカライザー等の Enhanced MR 撮像では、フレームごとに TE や向きなどの撮像条件が異なります。
+
+`dicom-organizer` は上の表の列について、フレームごとの違いを表現します：
+- `SharedFunctionalGroupsSequence` にある値は全フレーム共通として 1 つの値を返します。
+- `PerFrameFunctionalGroupsSequence` にある値は全フレームをフレーム順に走査します。フレーム間で値が異なる場合、異なる値をフレーム順に重複なく `|` で連結します（例: `10|20|30`）。
+- フレーム間で値が変動した列名は `FrameVaryingAttributes` に記録され、どの撮像パラメータが変動しているかを一目で確認できます。
+- Enhanced MR 画像で `ImageOrientationPatient` または `InPlanePhaseEncodingDirection` がフレーム間で変わる場合、フレームごとに患者座標の方向を求め、異なる値をフレーム順に `|` で連結し、`FrameVaryingAttributes` の末尾に `PhaseEncodingDirectionPatient` を追加します。classic 画像や、向きが変わらない Enhanced 画像では単一値となり、`FrameVaryingAttributes` には追加されません。
+
+### Functional Group 取得元対応表
+
+次の列は「classic の top-level 属性があればそれ、なければ Functional Group」から取得します（classic 優先）。
+
+| CSV 列 | classic 属性 | Functional Group の sequence | 属性 |
+|---|---|---|---|
+| `TR_ms` | `RepetitionTime` | `MRTimingAndRelatedParametersSequence` | `RepetitionTime` |
+| `FlipAngle_deg` | `FlipAngle` | `MRTimingAndRelatedParametersSequence` | `FlipAngle` |
+| `EchoTrainLength` | `EchoTrainLength` | `MRTimingAndRelatedParametersSequence` | `EchoTrainLength` |
+| `TE_ms` | `EchoTime` | `MREchoSequence` | `EffectiveEchoTime` |
+| `InversionTime_ms` | `InversionTime` | `MRModifierSequence` | `InversionTimes` |
+| `PixelBandwidth_Hz_per_px` | `PixelBandwidth` | `MRImagingModifierSequence` | `PixelBandwidth` |
+| `NumberOfAverages` | `NumberOfAverages` | `MRAveragesSequence` | `NumberOfAverages` |
+| `PixelSpacing` | `PixelSpacing` | `PixelMeasuresSequence` | `PixelSpacing` |
+| `SliceThickness_mm` | `SliceThickness` | `PixelMeasuresSequence` | `SliceThickness` |
+| `SpacingBetweenSlices_mm` | `SpacingBetweenSlices` | `PixelMeasuresSequence` | `SpacingBetweenSlices` |
+| `ImageOrientationPatient` | `ImageOrientationPatient` | `PlaneOrientationSequence` | `ImageOrientationPatient` |
+| `InPlanePhaseEncodingDirection` | `InPlanePhaseEncodingDirection` | `MRFOVGeometrySequence` | `InPlanePhaseEncodingDirection` |
+| `ParallelReductionFactorInPlane` | `ParallelReductionFactorInPlane` | `MRModifierSequence` | `ParallelReductionFactorInPlane` |
+
+### 制限事項
+
+- 一部のフレームにしか値がない属性は、値のあるフレームだけから連結します（値のないフレームは無視します）。
+- Enhanced CT / PET / XA などでは、表の汎用の列（`PixelSpacing`, `SliceThickness`, `SpacingBetweenSlices`, `ImageOrientationPatient`, `ImagePositionPatient`）は Functional Group から読みますが、CT の KVP などモダリティ固有のパラメータは classic の top-level 属性だけを読むため、Enhanced CT では `N/A` になり得ます。
+- `ImagePositionPatient` は classic がなければ `PlanePositionSequence` の最初のフレームの値を使用します（スライス位置は通常フレームごとに異なるため、変動属性一覧には含めません）。
+- `FOV_HxW_mm` は最初に得られる PixelSpacing を用いて計算します。
+- `EchoTimes_ms` と `EchoCount` の集計では、`TE_ms` の値を `|` で分割してから異なる値を数えるため、Enhanced multi-echo で 1 行に `10|20|30` が入る場合でも `EchoCount=3` として正しく集計されます。

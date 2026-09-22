@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import tomllib
 from dataclasses import replace
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from pydicom.dataset import Dataset, FileDataset, FileMetaDataset
 from pydicom.sequence import Sequence
 from pydicom.uid import (
     CTImageStorage,
+    EnhancedMRImageStorage,
     ExplicitVRLittleEndian,
     MRImageStorage,
     PositronEmissionTomographyImageStorage,
@@ -28,6 +30,7 @@ from pydicom.uid import (
 )
 
 from dicom_organizer.core import (
+    CONFIG_KEYS,
     DEFAULT_FILE_TEMPLATE,
     DEFAULT_SERIES_DIR_TEMPLATE,
     FILE_REPORT_COLUMNS,
@@ -37,18 +40,24 @@ from dicom_organizer.core import (
     ProgressEvent,
     build_items,
     classify_dicom_file,
+    config_to_toml,
+    diagnostics_lines,
     ensure_within_output_root,
     format_duration,
+    load_config,
     materialize,
     normalize_options,
+    normalize_vendor_name,
     parallel_reduction_factor_in_plane_value,
     parse_args,
     phase_encoding_direction_patient,
     print_summary,
     run,
+    run_self_test,
     safe_date,
     scan_duration_fields,
 )
+from dicom_organizer.sample_data import create_sample_dataset
 
 
 def write_dicom(
@@ -3414,17 +3423,348 @@ def test_list_only_ordering_matches_regular_organization(tmp_path: Path) -> None
     assert param_keys == sorted(param_keys)
 
 
+def test_enhanced_mr_multiframe_and_varying_attributes(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+
+    meta = FileMetaDataset()
+    meta.MediaStorageSOPClassUID = EnhancedMRImageStorage
+    meta.MediaStorageSOPInstanceUID = generate_uid()
+    meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    meta.ImplementationClassUID = generate_uid()
+    ds = FileDataset(str(input_root / "enhanced.dcm"), {}, file_meta=meta, preamble=b"\0" * 128)
+    ds.SOPClassUID = EnhancedMRImageStorage
+    ds.SOPInstanceUID = meta.MediaStorageSOPInstanceUID
+    ds.SeriesInstanceUID = generate_uid()
+    ds.StudyInstanceUID = generate_uid()
+    ds.Modality = "MR"
+    ds.StudyDate = "20260515"
+    ds.AcquisitionDate = "20260515"
+    ds.SeriesNumber = 5
+    ds.InstanceNumber = 1
+    ds.SeriesDescription = "Enhanced ME"
+    ds.ProtocolName = "Enhanced ME"
+    ds.PatientName = "Enhanced^Patient"
+    ds.PatientID = "PID001"
+    ds.Manufacturer = "UnitTest"
+    ds.ManufacturerModelName = "Synthetic"
+    ds.Rows = 16
+    ds.Columns = 16
+    ds.NumberOfFrames = 3
+    ds.ImageType = ["ORIGINAL", "PRIMARY", "M", "NONE"]
+
+    shared_item = Dataset()
+    timing = Dataset()
+    timing.RepetitionTime = 2000.0
+    timing.FlipAngle = 15.0
+    timing.EchoTrainLength = 1
+    shared_item.MRTimingAndRelatedParametersSequence = Sequence([timing])
+
+    pixel_meas = Dataset()
+    pixel_meas.PixelSpacing = [0.5, 0.5]
+    pixel_meas.SliceThickness = 3.0
+    shared_item.PixelMeasuresSequence = Sequence([pixel_meas])
+
+    plane_orient = Dataset()
+    plane_orient.ImageOrientationPatient = [1, 0, 0, 0, 1, 0]
+    shared_item.PlaneOrientationSequence = Sequence([plane_orient])
+
+    fov_geom = Dataset()
+    fov_geom.InPlanePhaseEncodingDirection = "ROW"
+    shared_item.MRFOVGeometrySequence = Sequence([fov_geom])
+
+    ds.SharedFunctionalGroupsSequence = Sequence([shared_item])
+
+    frames = []
+    for index, echo in enumerate((10.0, 20.0, 30.0)):
+        frame_item = Dataset()
+        echo_ds = Dataset()
+        echo_ds.EffectiveEchoTime = echo
+        frame_item.MREchoSequence = Sequence([echo_ds])
+        pos_ds = Dataset()
+        pos_ds.ImagePositionPatient = [0, 0, float(index)]
+        frame_item.PlanePositionSequence = Sequence([pos_ds])
+        frames.append(frame_item)
+    ds.PerFrameFunctionalGroupsSequence = Sequence(frames)
+    ds.save_as(input_root / "enhanced.dcm", enforce_file_format=True)
+
+    run(OrganizeOptions(input_root=input_root, output_root=output_root))
+
+    with (output_root / "UnitTest_Synthetic" / "20260515" / "dicom_parameters.csv").open(
+        encoding="utf-8-sig", newline=""
+    ) as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["TE_ms"] == "10.0|20.0|30.0"
+    assert row["EchoCount"] == "3"
+    assert row["EchoTimes_ms"] == "10.0|20.0|30.0"
+    assert row["TR_ms"] == "2000.0"
+    assert row["FlipAngle_deg"] == "15.0"
+    assert row["NumberOfFrames"] == "3"
+    assert row["FrameVaryingAttributes"] == "TE_ms"
+    assert row["FOV_HxW_mm"] == "8x8"
+    assert row["PhaseEncodingDirectionPatient"] == "R→L"
+
+    with (output_root / "UnitTest_Synthetic" / "20260515" / "series_summary.csv").open(
+        encoding="utf-8-sig", newline=""
+    ) as f:
+        summary_rows = list(csv.DictReader(f))
+    assert summary_rows[0]["FrameVaryingAttributes"] == "TE_ms"
 
 
+def test_classic_mr_frames_columns_na(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+    write_dicom(
+        input_root / "classic.dcm",
+        series_uid=generate_uid(),
+        sop_uid=generate_uid(),
+        series_number=1,
+        instance_number=1,
+    )
+    run(OrganizeOptions(input_root=input_root, output_root=output_root))
+    with (output_root / "UnitTest_Synthetic" / "20260515" / "dicom_parameters.csv").open(
+        encoding="utf-8-sig", newline=""
+    ) as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    assert rows[0]["NumberOfFrames"] == "N/A"
+    assert rows[0]["FrameVaryingAttributes"] == "N/A"
 
 
+def test_config_file_loading_and_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert len(CONFIG_KEYS) == 16
+    assert "output" in CONFIG_KEYS
+    input_root = tmp_path / "input"
+    input_root.mkdir()
+    cfg_dir = tmp_path / "facility"
+    cfg_dir.mkdir()
+    cfg_file = cfg_dir / "config.toml"
+    cfg_file.write_text(
+        'output = "my_out"\npatient_mode = "hash"\nlayout = "study"\n'
+        'dicom_tags = ["EchoTime"]\nchecksum = true\n',
+        encoding="utf-8",
+    )
+    loaded = load_config(cfg_file)
+    assert Path(loaded["output"]) == (cfg_dir / "my_out").resolve()
+    assert loaded["patient_mode"] == "hash"
+    assert loaded["checksum"] is True
+
+    args = parse_args([str(input_root), "--config", str(cfg_file)])
+    opts = normalize_options(args)
+    assert opts.output_root == (cfg_dir / "my_out").resolve()
+    assert opts.patient_mode == "hash"
+    assert opts.layout == "study"
+    assert opts.checksum is True
+    assert opts.dicom_tags == ("EchoTime",)
+    assert opts.config_file == str(cfg_file.resolve())
+
+    args2 = parse_args([
+        str(input_root), "--config", str(cfg_file),
+        "--patient-mode", "drop", "-t", "FlipAngle",
+    ])
+    opts2 = normalize_options(args2)
+    assert opts2.patient_mode == "drop"
+    assert opts2.dicom_tags == ("EchoTime", "FlipAngle")
+
+    monkeypatch.setenv("DICOM_ORGANIZER_CONFIG", str(cfg_file))
+    args3 = parse_args([str(input_root)])
+    opts3 = normalize_options(args3)
+    assert opts3.patient_mode == "hash"
 
 
+def test_config_file_validation_and_errors(tmp_path: Path) -> None:
+    bad_unknown = tmp_path / "bad_unknown.toml"
+    bad_unknown.write_text("invalid_key = 'val'\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid_key"):
+        load_config(bad_unknown)
+
+    bad_type = tmp_path / "bad_type.toml"
+    bad_type.write_text("checksum = 'yes'\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="checksum"):
+        load_config(bad_type)
+
+    bad_choice = tmp_path / "bad_choice.toml"
+    bad_choice.write_text("layout = 'nonexistent'\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="layout"):
+        load_config(bad_choice)
+
+    bad_syntax = tmp_path / "bad_syntax.toml"
+    bad_syntax.write_text("checksum = \n", encoding="utf-8")
+    with pytest.raises(ValueError, match="bad_syntax.toml"):
+        load_config(bad_syntax)
+
+    values = {
+        "output": str(tmp_path / "out"),
+        "patient_mode": "drop",
+        "dicom_tags": ["EchoTime", 'Col"Q"=0018,0081'],
+        "checksum": True,
+        "series_dir_template": "{series_number}_{series_folder_label}",
+    }
+    toml_str = config_to_toml(values)
+    parsed = tomllib.loads(toml_str)
+    assert parsed == values
 
 
+def test_sample_dataset_determinism_and_expected(tmp_path: Path) -> None:
+    ds1 = create_sample_dataset(tmp_path / "a")
+    ds2 = create_sample_dataset(tmp_path / "b")
+
+    uids_1 = {
+        str(pydicom.dcmread(p, stop_before_pixels=True).SOPInstanceUID)
+        for p in ds1.root.rglob("IM*")
+    }
+    uids_2 = {
+        str(pydicom.dcmread(p, stop_before_pixels=True).SOPInstanceUID)
+        for p in ds2.root.rglob("IM*")
+    }
+    assert uids_1 == uids_2
+    assert len(uids_1) == ds1.expected["organized_files"]
+
+    out = tmp_path / "out"
+    res = run(OrganizeOptions(input_root=ds1.root, output_root=out))
+    assert res.summary["organized_files"] == ds1.expected["organized_files"]
+    assert res.summary["csv_target_files"] == ds1.expected["csv_target_files"]
+    assert res.summary["series_count"] == ds1.expected["series_count"]
 
 
+def test_self_test_and_report_file(tmp_path: Path) -> None:
+    report_file = tmp_path / "self_test_report.txt"
+    exit_code = run_self_test(report_path=report_file)
+    assert exit_code == 0
+    assert report_file.is_file()
+    content = report_file.read_text(encoding="utf-8")
+    assert "[PASS]" in content
+    assert "self-test: 3/3 checks passed" in content
 
 
+def test_diagnostics_lines_no_home_leak() -> None:
+    lines = diagnostics_lines(config_file="/Users/example/fake/config.toml")
+    assert isinstance(lines, list)
+    assert len(lines) == 10
+    home = str(Path.home())
+    output_text = "\n".join(lines)
+    assert home not in output_text
 
 
+def test_normalize_vendor_name_word_boundary() -> None:
+    assert normalize_vendor_name("GE MEDICAL SYSTEMS") == "GE"
+    assert normalize_vendor_name("GE HealthCare") == "GE"
+    assert normalize_vendor_name("General Electric Medical Systems") == "GE"
+    assert normalize_vendor_name("Agfa-Gevaert") != "GE"
+    assert normalize_vendor_name("Agfa-Gevaert") == "Agfa-Gevaert"
+    assert normalize_vendor_name("SIEMENS") == "Siemens"
+    assert normalize_vendor_name("Siemens Healthineers") == "Siemens"
+    assert normalize_vendor_name("Philips Medical Systems") == "Philips"
+    assert normalize_vendor_name("PHILIPS") == "Philips"
+    assert normalize_vendor_name("Canon Medical Systems") == "Canon"
+    assert normalize_vendor_name("TOSHIBA") == "Toshiba"
+    assert normalize_vendor_name("Hitachi Medical") == "Hitachi"
+    assert normalize_vendor_name("FUJIFILM Corporation") == "Fujifilm"
+    assert normalize_vendor_name("Fuji Photo Film") == "Fujifilm"
+
+
+def test_config_file_tilde_expansion(tmp_path: Path) -> None:
+    cfg = tmp_path / "test_config.toml"
+    cfg.write_text('output = "~/dicom_organizer_test_out"\n', encoding="utf-8")
+    loaded = load_config(cfg)
+    expected = str((Path.home() / "dicom_organizer_test_out").resolve())
+    assert loaded["output"] == expected
+
+
+def test_enhanced_mr_multi_orientation_phase_encoding(tmp_path: Path) -> None:
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    input_root.mkdir()
+
+    meta = FileMetaDataset()
+    meta.MediaStorageSOPClassUID = EnhancedMRImageStorage
+    meta.MediaStorageSOPInstanceUID = generate_uid()
+    meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    meta.ImplementationClassUID = generate_uid()
+    ds = FileDataset(str(input_root / "multi_orient.dcm"), {}, file_meta=meta, preamble=b"\0" * 128)
+    ds.SOPClassUID = EnhancedMRImageStorage
+    ds.SOPInstanceUID = meta.MediaStorageSOPInstanceUID
+    ds.SeriesInstanceUID = generate_uid()
+    ds.StudyInstanceUID = generate_uid()
+    ds.Modality = "MR"
+    ds.StudyDate = "20260520"
+    ds.SeriesNumber = 12
+    ds.InstanceNumber = 1
+    ds.SeriesDescription = "Multi-orient localizer"
+    ds.PatientName = "Orient^Test"
+    ds.PatientID = "PID_ORIENT"
+    ds.Manufacturer = "UnitTest"
+    ds.Rows = 16
+    ds.Columns = 16
+    ds.NumberOfFrames = 3
+    ds.ImageType = ["ORIGINAL", "PRIMARY", "M", "NONE"]
+
+    shared_item = Dataset()
+    timing = Dataset()
+    timing.RepetitionTime = 100.0
+    timing.FlipAngle = 20.0
+    shared_item.MRTimingAndRelatedParametersSequence = Sequence([timing])
+    pixel_meas = Dataset()
+    pixel_meas.PixelSpacing = [1.0, 1.0]
+    pixel_meas.SliceThickness = 5.0
+    shared_item.PixelMeasuresSequence = Sequence([pixel_meas])
+    fov_geom = Dataset()
+    fov_geom.InPlanePhaseEncodingDirection = "COL"
+    shared_item.MRFOVGeometrySequence = Sequence([fov_geom])
+    ds.SharedFunctionalGroupsSequence = Sequence([shared_item])
+
+    # 3 frames: axial (A->P), coronal (H->F), sagittal (H->F)
+    orientations = [
+        [1, 0, 0, 0, 1, 0],   # axial: COL=(0,1,0) -> A->P
+        [1, 0, 0, 0, 0, -1],  # coronal: COL=(0,0,-1) -> H->F
+        [0, 1, 0, 0, 0, -1],  # sagittal: COL=(0,0,-1) -> H->F
+    ]
+    frames = []
+    for orient in orientations:
+        f_item = Dataset()
+        po = Dataset()
+        po.ImageOrientationPatient = orient
+        f_item.PlaneOrientationSequence = Sequence([po])
+        frames.append(f_item)
+    ds.PerFrameFunctionalGroupsSequence = Sequence(frames)
+    ds.save_as(input_root / "multi_orient.dcm", enforce_file_format=True)
+
+    run(OrganizeOptions(input_root=input_root, output_root=output_root))
+
+    param_csv = next(output_root.rglob("dicom_parameters.csv"))
+    with param_csv.open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["PhaseEncodingDirectionPatient"] == "A→P|H→F"
+    assert "PhaseEncodingDirectionPatient" in row["FrameVaryingAttributes"]
+    assert row["FrameVaryingAttributes"].endswith("PhaseEncodingDirectionPatient")
+
+    summary_csv = next(output_root.rglob("series_summary.csv"))
+    with summary_csv.open(encoding="utf-8-sig", newline="") as handle:
+        s_rows = list(csv.DictReader(handle))
+    assert len(s_rows) == 1
+    assert s_rows[0]["PhaseEncodingDirectionPatient"] == "A→P|H→F"
+
+
+def test_diagnostics_lines_mask_home_exact_or_sep() -> None:
+    home = str(Path.home())
+    sibling_home = home + "def" + os.sep + "config.toml"
+    lines = diagnostics_lines(config_file=sibling_home)
+    config_line = next(line for line in lines if line.startswith("config_file: "))
+    assert sibling_home in config_line
+    assert not config_line.startswith("config_file: ~def")
+
+    exact_home = home
+    lines_exact = diagnostics_lines(config_file=exact_home)
+    config_line_exact = next(line for line in lines_exact if line.startswith("config_file: "))
+    assert config_line_exact == "config_file: ~"
+
+    child_home = home + os.sep + "my_config.toml"
+    lines_child = diagnostics_lines(config_file=child_home)
+    config_line_child = next(line for line in lines_child if line.startswith("config_file: "))
+    assert config_line_child == "config_file: ~/my_config.toml"

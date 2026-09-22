@@ -8,6 +8,16 @@ occur, but they should be documented here.
 
 ## 0.2.0 - Unreleased
 
+- Add Enhanced / multi-frame DICOM support: extract 13 key imaging parameters from Shared and Per-Frame Functional Groups when classic attributes are absent, preserve distinct frame-varying values with `|` delimiters in frame order, and add `NumberOfFrames` and `FrameVaryingAttributes` common columns to both `dicom_parameters.csv` and `series_summary.csv`.
+- Enhance multi-echo TE aggregation: split `TE_ms` values by `|` before counting unique echo times to correctly calculate `EchoCount` and `EchoTimes_ms` on Enhanced multi-echo series.
+- Add facility-wide TOML configuration file support via `--config PATH` and the `DICOM_ORGANIZER_CONFIG` environment variable, with strict schema/type validation, relative `output` path resolution against config directory, and CLI precedence merging.
+- Add `--print-config` command to export current effective configuration (defaults + config + CLI) as valid TOML for template generation.
+- Track `config_file` in `OrganizeOptions` and record its path in `organize_summary.json`.
+- Add deterministic synthetic sample dataset generator (`src/dicom_organizer/sample_data.py`, `create_sample_dataset()`) providing realistic multi-scanner, multi-study messy test datasets with pixel data and expected metrics.
+- Add self-test diagnostic tool via `--self-test` and `--self-test-report PATH` (`src/dicom_organizer/selftest.py`, `run_self_test()`) to verify standard organization, list-only, and dry-run behaviors using ephemeral sample data.
+- Add bug-report environment diagnostics via `--diagnostics` and `diagnostics_lines()`, sanitizing home directory paths (`~`) without including patient or input directory information.
+- Update `examples/synthetic_quickstart.py` to use `create_sample_dataset()`.
+- Add `docs/configuration.md` and expand `docs/csv-schema.md` in both English and Japanese.
 - Add `--list-only` mode to write metadata parameter tables and reports without copying or materializing DICOM files (defaulting to `<input>/organized_list`).
 - Add `StudyFolder` and `SeriesFolder` columns to both `dicom_parameters.csv` and `series_summary.csv`.
 - Add run-level `all_series_summary.csv` written directly under output root in both regular organization and list-only mode, concatenating all series summaries across studies and runs.

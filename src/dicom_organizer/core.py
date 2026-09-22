@@ -30,6 +30,7 @@ import re
 import shutil
 import sys
 import threading
+import tomllib
 import uuid
 import warnings
 from collections import Counter, defaultdict
@@ -193,6 +194,8 @@ COMMON_METADATA_COLUMNS = [
     "IsNormalized",
     "ScanDuration",
     "ScanDurationSource",
+    "NumberOfFrames",
+    "FrameVaryingAttributes",
 ]
 
 MR_METADATA_COLUMNS = [
@@ -335,6 +338,138 @@ IF_EXISTS_MODES = ("error", "skip", "overwrite", "rename")
 PATIENT_MODES = ("keep", "hash", "drop")
 LAYOUTS = ("device-date", "study", "patient-study")
 
+CONFIG_KEYS: tuple[str, ...] = (
+    "output",
+    "action",
+    "if_exists",
+    "profile",
+    "patient_mode",
+    "layout",
+    "list_only",
+    "dicom_tags",
+    "force_read",
+    "include_hidden",
+    "include_organized",
+    "series_dir_template",
+    "file_template",
+    "checksum",
+    "space_check",
+    "progress",
+)
+
+CONFIG_KEY_TYPES: dict[str, type] = {
+    "output": str,
+    "action": str,
+    "if_exists": str,
+    "profile": str,
+    "patient_mode": str,
+    "layout": str,
+    "list_only": bool,
+    "dicom_tags": list,
+    "force_read": bool,
+    "include_hidden": bool,
+    "include_organized": bool,
+    "series_dir_template": str,
+    "file_template": str,
+    "checksum": bool,
+    "space_check": bool,
+    "progress": bool,
+}
+
+CONFIG_CHOICES: dict[str, tuple[str, ...]] = {
+    "action": tuple(ACTIONS),
+    "if_exists": tuple(IF_EXISTS_MODES),
+    "profile": tuple(PROFILE_NAMES),
+    "patient_mode": tuple(PATIENT_MODES),
+    "layout": tuple(LAYOUTS),
+}
+
+
+def load_config(path: Path) -> dict[str, Any]:
+    """Load and validate facility configuration file from TOML format."""
+    path = Path(path).expanduser()
+    if not path.is_file():
+        raise ValueError(f"Configuration file not found: '{path}'")
+    try:
+        with path.open("rb") as f:
+            data = tomllib.load(f)
+    except Exception as exc:
+        raise ValueError(f"Failed to parse TOML configuration file '{path}': {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError(f"Configuration file '{path}' must define a top-level table")
+
+    allowed_keys_set = set(CONFIG_KEYS)
+    for key in data:
+        if key not in allowed_keys_set:
+            raise ValueError(
+                f"Unknown config key '{key}' in '{path}'. "
+                f"Allowed keys are: {', '.join(CONFIG_KEYS)}"
+            )
+
+    validated: dict[str, Any] = {}
+    for key, val in data.items():
+        expected_type = CONFIG_KEY_TYPES[key]
+        if expected_type is bool:
+            if not isinstance(val, bool):
+                raise ValueError(
+                    f"Config key '{key}' in '{path}' expects boolean (true/false), got {type(val).__name__}"
+                )
+        elif expected_type is str:
+            if not isinstance(val, str) or isinstance(val, bool):
+                raise ValueError(
+                    f"Config key '{key}' in '{path}' expects string, got {type(val).__name__}"
+                )
+        elif expected_type is list:
+            if not isinstance(val, list):
+                raise ValueError(
+                    f"Config key '{key}' in '{path}' expects array of strings, got {type(val).__name__}"
+                )
+            for item in val:
+                if not isinstance(item, str) or isinstance(item, bool):
+                    raise ValueError(
+                        f"Config key '{key}' in '{path}' expects array of strings, found {type(item).__name__}"
+                    )
+
+        if key in CONFIG_CHOICES:
+            choices = CONFIG_CHOICES[key]
+            if val not in choices:
+                raise ValueError(
+                    f"Invalid value '{val}' for config key '{key}' in '{path}'. "
+                    f"Allowed choices are: {', '.join(choices)}"
+                )
+
+        if key == "output":
+            out_p = Path(val).expanduser()
+            if not out_p.is_absolute():
+                val = str((path.parent / out_p).resolve())
+            else:
+                val = str(out_p.resolve())
+
+        validated[key] = val
+
+    return validated
+
+
+def config_to_toml(values: dict[str, Any]) -> str:
+    """Format configuration dictionary as TOML ordered by CONFIG_KEYS."""
+    lines: list[str] = []
+    for key in CONFIG_KEYS:
+        if key not in values:
+            continue
+        val = values[key]
+        if isinstance(val, bool):
+            lines.append(f"{key} = {'true' if val else 'false'}")
+        elif isinstance(val, str):
+            lines.append(f"{key} = {json.dumps(val)}")
+        elif isinstance(val, (list, tuple)):
+            items_str = ", ".join(json.dumps(str(x)) for x in val)
+            lines.append(f"{key} = [{items_str}]")
+        else:
+            lines.append(f"{key} = {json.dumps(val)}")
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
 SIEMENS_PARALLEL_REDUCTION_FACTOR_PATTERN = re.compile(
     rb"(?:^|[\x00\r\n ])sPat\.lAccelFactPE\s*=\s*([0-9]+(?:\.[0-9]+)?)"
 )
@@ -372,6 +507,7 @@ class OrganizeOptions:
     space_check: bool = True
     list_only: bool = False
     layout: str = "device-date"
+    config_file: str | None = None
 
 
 @dataclass(frozen=True)
@@ -465,6 +601,25 @@ class OrganizeResult:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--config")
+    pre_parser.add_argument("--print-config", action="store_true")
+    pre_parser.add_argument("--self-test", action="store_true")
+    pre_parser.add_argument("--self-test-report", type=Path)
+    pre_parser.add_argument("--diagnostics", action="store_true")
+    pre_args, _ = pre_parser.parse_known_args(argv)
+
+    config_path_str = pre_args.config
+    if config_path_str is None:
+        config_path_str = os.environ.get("DICOM_ORGANIZER_CONFIG")
+
+    config_values: dict[str, Any] = {}
+    config_file_resolved: str | None = None
+    if config_path_str:
+        config_path = Path(config_path_str).expanduser()
+        config_values = load_config(config_path)
+        config_file_resolved = str(config_path.resolve())
+
     parser = argparse.ArgumentParser(
         description="Organize DICOM files by device, StudyDate, and SeriesInstanceUID."
     )
@@ -472,6 +627,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--version",
         action="version",
         version=f"%(prog)s {package_version()}",
+    )
+    parser.add_argument(
+        "--config",
+        help="Path to TOML configuration file for facility-wide settings.",
+    )
+    parser.add_argument(
+        "--print-config",
+        action="store_true",
+        help="Print effective configuration in TOML format and exit.",
+    )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Run self-diagnostic tests and exit.",
+    )
+    parser.add_argument(
+        "--self-test-report",
+        type=Path,
+        help="Save self-test report to specified file.",
+    )
+    parser.add_argument(
+        "--diagnostics",
+        action="store_true",
+        help="Print environment diagnostics for bug reports and exit.",
     )
     parser.add_argument(
         "input_path",
@@ -632,12 +811,32 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=True,
         help="Disable console progress display.",
     )
+
+    defaults_to_set: dict[str, Any] = {}
+    for key, val in config_values.items():
+        if key == "output":
+            defaults_to_set["output"] = Path(val)
+        elif key == "dicom_tags":
+            defaults_to_set["dicom_tags"] = list(val)
+        else:
+            defaults_to_set[key] = val
+
+    if defaults_to_set:
+        parser.set_defaults(**defaults_to_set)
+
     args = parser.parse_args(argv)
-    if args.input is None and args.input_path is None:
-        parser.error("the following arguments are required: INPUT (or --input)")
-    if args.input is not None and args.input_path is not None:
-        parser.error("specify the input directory either as INPUT or --input, not both")
-    args.input = args.input if args.input is not None else args.input_path
+    args.config_file = config_file_resolved
+
+    is_standalone_mode = bool(args.self_test or args.diagnostics or args.print_config)
+    if not is_standalone_mode:
+        if args.input is None and args.input_path is None:
+            parser.error("the following arguments are required: INPUT (or --input)")
+        if args.input is not None and args.input_path is not None:
+            parser.error("specify the input directory either as INPUT or --input, not both")
+        args.input = args.input if args.input is not None else args.input_path
+    else:
+        if args.input is None and args.input_path is not None:
+            args.input = args.input_path
     return args
 
 
@@ -697,6 +896,7 @@ def normalize_options(
             space_check=bool(getattr(args, "space_check", True)),
             list_only=is_list_only,
             layout=str(getattr(args, "layout", "device-date") or "device-date"),
+            config_file=getattr(args, "config_file", None),
         )
 
     if validate:
@@ -1023,7 +1223,7 @@ def normalize_vendor_name(manufacturer: str) -> str:
     if not cleaned or cleaned == "N/A":
         return ""
     m = cleaned.casefold()
-    if "ge" in m:
+    if re.search(r"\bge\b", m) or "general electric" in m:
         return "GE"
     if "siemens" in m:
         return "Siemens"
@@ -1035,7 +1235,7 @@ def normalize_vendor_name(manufacturer: str) -> str:
         return "Toshiba"
     if "hitachi" in m:
         return "Hitachi"
-    if "fujifilm" in m or "fuji" in m:
+    if "fujifilm" in m or re.search(r"\bfuji\b", m):
         return "Fujifilm"
     return safe_name(cleaned, fallback="UnknownVendor")
 
@@ -1240,26 +1440,46 @@ def pixel_spacing(ds: pydicom.dataset.Dataset) -> str:
     return text_value(getattr(ds, "PixelSpacing", None), default="N/A")
 
 
+def functional_group_values(
+    ds: Any,
+    sequence_name: str,
+    attribute_name: str,
+) -> list[Any]:
+    """Return functional-group values in frame order.
+
+    A value in SharedFunctionalGroupsSequence applies to all frames and is returned once.
+    Otherwise values are collected from each PerFrameFunctionalGroupsSequence item that has it.
+    """
+    shared = getattr(ds, "SharedFunctionalGroupsSequence", None)
+    if shared:
+        for item in shared:
+            nested = getattr(item, sequence_name, None)
+            if nested:
+                for subitem in nested:
+                    val = getattr(subitem, attribute_name, None)
+                    if val is not None and val != "":
+                        return [val]
+    per_frame = getattr(ds, "PerFrameFunctionalGroupsSequence", None)
+    results = []
+    if per_frame:
+        for frame_item in per_frame:
+            nested = getattr(frame_item, sequence_name, None)
+            if nested:
+                for subitem in nested:
+                    val = getattr(subitem, attribute_name, None)
+                    if val is not None and val != "":
+                        results.append(val)
+    return results
+
+
 def functional_group_value(
     ds: pydicom.dataset.Dataset,
     sequence_name: str,
     attribute_name: str,
 ) -> Any | None:
     """Return the first shared/per-frame functional-group attribute value."""
-    for functional_groups_name in (
-        "SharedFunctionalGroupsSequence",
-        "PerFrameFunctionalGroupsSequence",
-    ):
-        functional_groups = getattr(ds, functional_groups_name, None)
-        if not functional_groups:
-            continue
-        nested_sequence = getattr(functional_groups[0], sequence_name, None)
-        if not nested_sequence:
-            continue
-        value = getattr(nested_sequence[0], attribute_name, None)
-        if value is not None and value != "":
-            return value
-    return None
+    values = functional_group_values(ds, sequence_name, attribute_name)
+    return values[0] if values else None
 
 
 def image_orientation_patient_value(ds: pydicom.dataset.Dataset) -> Any | None:
@@ -1270,6 +1490,17 @@ def image_orientation_patient_value(ds: pydicom.dataset.Dataset) -> Any | None:
         ds,
         "PlaneOrientationSequence",
         "ImageOrientationPatient",
+    )
+
+
+def image_position_patient_value(ds: pydicom.dataset.Dataset) -> Any | None:
+    value = getattr(ds, "ImagePositionPatient", None)
+    if value is not None and value != "":
+        return value
+    return functional_group_value(
+        ds,
+        "PlanePositionSequence",
+        "ImagePositionPatient",
     )
 
 
@@ -1311,6 +1542,73 @@ def parallel_reduction_factor_in_plane_value(ds: pydicom.dataset.Dataset) -> Any
         if factor > 0:
             return factor
     return None
+
+
+ENHANCED_ATTRIBUTE_MAPPING: tuple[tuple[str, str, str, str], ...] = (
+    ("TR_ms", "RepetitionTime", "MRTimingAndRelatedParametersSequence", "RepetitionTime"),
+    ("FlipAngle_deg", "FlipAngle", "MRTimingAndRelatedParametersSequence", "FlipAngle"),
+    ("EchoTrainLength", "EchoTrainLength", "MRTimingAndRelatedParametersSequence", "EchoTrainLength"),
+    ("TE_ms", "EchoTime", "MREchoSequence", "EffectiveEchoTime"),
+    ("InversionTime_ms", "InversionTime", "MRModifierSequence", "InversionTimes"),
+    ("PixelBandwidth_Hz_per_px", "PixelBandwidth", "MRImagingModifierSequence", "PixelBandwidth"),
+    ("NumberOfAverages", "NumberOfAverages", "MRAveragesSequence", "NumberOfAverages"),
+    ("PixelSpacing", "PixelSpacing", "PixelMeasuresSequence", "PixelSpacing"),
+    ("SliceThickness_mm", "SliceThickness", "PixelMeasuresSequence", "SliceThickness"),
+    ("SpacingBetweenSlices_mm", "SpacingBetweenSlices", "PixelMeasuresSequence", "SpacingBetweenSlices"),
+    ("ImageOrientationPatient", "ImageOrientationPatient", "PlaneOrientationSequence", "ImageOrientationPatient"),
+    ("InPlanePhaseEncodingDirection", "InPlanePhaseEncodingDirection", "MRFOVGeometrySequence", "InPlanePhaseEncodingDirection"),
+    ("ParallelReductionFactorInPlane", "ParallelReductionFactorInPlane", "MRModifierSequence", "ParallelReductionFactorInPlane"),
+)
+
+
+def resolve_enhanced_attributes(
+    ds: pydicom.dataset.Dataset,
+) -> tuple[dict[str, str], str]:
+    """Resolve the 13 enhanced/classic attributes and return (values_dict, frame_varying_attributes)."""
+    has_per_frame = bool(getattr(ds, "PerFrameFunctionalGroupsSequence", None))
+    resolved: dict[str, str] = {}
+    varying_columns: list[str] = []
+
+    for col, classic_attr, fg_seq, fg_attr in ENHANCED_ATTRIBUTE_MAPPING:
+        classic_val = getattr(ds, classic_attr, None)
+        if classic_val is not None and classic_val != "":
+            if classic_attr == "PixelSpacing":
+                resolved[col] = pixel_spacing(ds)
+            else:
+                resolved[col] = text_value(classic_val)
+            continue
+
+        fg_vals = functional_group_values(ds, fg_seq, fg_attr)
+        if not fg_vals:
+            if col == "ParallelReductionFactorInPlane":
+                siemens_val = parallel_reduction_factor_in_plane_value(ds)
+                resolved[col] = text_value(siemens_val)
+            else:
+                resolved[col] = "N/A"
+            continue
+
+        seen: set[str] = set()
+        formatted_list: list[str] = []
+        for val in fg_vals:
+            t = text_value(val)
+            if not t or t == "N/A" or t in seen:
+                continue
+            seen.add(t)
+            formatted_list.append(t)
+
+        resolved[col] = "|".join(formatted_list) if formatted_list else "N/A"
+
+        if has_per_frame and len(formatted_list) > 1:
+            varying_columns.append(col)
+
+    if not has_per_frame:
+        frame_varying = "N/A"
+    elif varying_columns:
+        frame_varying = "|".join(varying_columns)
+    else:
+        frame_varying = "none"
+
+    return resolved, frame_varying
 
 
 def format_duration(value: Any) -> str:
@@ -1390,26 +1688,17 @@ def direction_cosines(value: Any) -> tuple[float, ...] | None:
     return cosines
 
 
-def phase_encoding_direction_patient(ds: pydicom.dataset.Dataset) -> str:
-    """Map the positive phase-encoding image axis to a biped patient direction."""
-    anatomical_orientation_type = ds_value(
-        ds,
-        "AnatomicalOrientationType",
-        default="BIPED",
-    ).upper()
-    if anatomical_orientation_type not in {"BIPED", "N/A"}:
-        return "N/A"
-
-    phase_axis = text_value(
-        in_plane_phase_encoding_direction_value(ds),
-        default="",
-    ).upper()
-    cosines = direction_cosines(image_orientation_patient_value(ds))
+def direction_from_cosines_and_axis(
+    cosines: tuple[float, ...] | None,
+    phase_axis: str,
+) -> str:
+    """Calculate the biped patient direction from cosines and in-plane phase axis."""
     if cosines is None:
         return "N/A"
-    if phase_axis == "ROW":
+    axis = phase_axis.strip().upper()
+    if axis == "ROW":
         vector = cosines[:3]
-    elif phase_axis in {"COL", "COLUMN"}:
+    elif axis in {"COL", "COLUMN"}:
         vector = cosines[3:]
     else:
         return "N/A"
@@ -1430,9 +1719,103 @@ def phase_encoding_direction_patient(ds: pydicom.dataset.Dataset) -> str:
     return f"{start}\N{RIGHTWARDS ARROW}{end}"
 
 
+def phase_encoding_direction_patient(ds: pydicom.dataset.Dataset) -> str:
+    """Map the positive phase-encoding image axis to a biped patient direction."""
+    anatomical_orientation_type = ds_value(
+        ds,
+        "AnatomicalOrientationType",
+        default="BIPED",
+    ).upper()
+    if anatomical_orientation_type not in {"BIPED", "N/A"}:
+        return "N/A"
+
+    phase_axis = text_value(
+        in_plane_phase_encoding_direction_value(ds),
+        default="",
+    )
+    cosines = direction_cosines(image_orientation_patient_value(ds))
+    return direction_from_cosines_and_axis(cosines, phase_axis)
+
+
+def _extract_sequence_attr(
+    frame_item: Any,
+    shared_sequence: Any | None,
+    top_level_ds: Any,
+    sequence_name: str,
+    attribute_name: str,
+) -> Any | None:
+    if frame_item is not None:
+        nested = getattr(frame_item, sequence_name, None)
+        if nested:
+            for subitem in nested:
+                val = getattr(subitem, attribute_name, None)
+                if val is not None and val != "":
+                    return val
+    if shared_sequence:
+        for item in shared_sequence:
+            nested = getattr(item, sequence_name, None)
+            if nested:
+                for subitem in nested:
+                    val = getattr(subitem, attribute_name, None)
+                    if val is not None and val != "":
+                        return val
+    val = getattr(top_level_ds, attribute_name, None)
+    if val is not None and val != "":
+        return val
+    return None
+
+
+def resolve_phase_encoding_direction(
+    ds: pydicom.dataset.Dataset,
+) -> tuple[str, bool]:
+    """Resolve PhaseEncodingDirectionPatient across frames.
+
+    Returns (ped_string, is_varying).
+    """
+    anatomical_orientation_type = ds_value(
+        ds,
+        "AnatomicalOrientationType",
+        default="BIPED",
+    ).upper()
+    if anatomical_orientation_type not in {"BIPED", "N/A"}:
+        return "N/A", False
+
+    per_frame = getattr(ds, "PerFrameFunctionalGroupsSequence", None)
+    if not per_frame:
+        return phase_encoding_direction_patient(ds), False
+
+    shared = getattr(ds, "SharedFunctionalGroupsSequence", None)
+    seen: set[str] = set()
+    unique_dirs: list[str] = []
+
+    for frame_item in per_frame:
+        iop = _extract_sequence_attr(
+            frame_item, shared, ds, "PlaneOrientationSequence", "ImageOrientationPatient"
+        )
+        ped = _extract_sequence_attr(
+            frame_item, shared, ds, "MRFOVGeometrySequence", "InPlanePhaseEncodingDirection"
+        )
+        cosines = direction_cosines(iop)
+        phase_axis = text_value(ped, default="")
+        d = direction_from_cosines_and_axis(cosines, phase_axis)
+        if d and d != "N/A" and d not in seen:
+            seen.add(d)
+            unique_dirs.append(d)
+
+    if not unique_dirs:
+        return phase_encoding_direction_patient(ds), False
+
+    if len(unique_dirs) > 1:
+        return "|".join(unique_dirs), True
+
+    return unique_dirs[0], False
+
+
 def fov_text(ds: pydicom.dataset.Dataset) -> str:
     try:
-        spacing = getattr(ds, "PixelSpacing")
+        spacing = getattr(ds, "PixelSpacing", None)
+        if spacing is None or spacing == "":
+            spacing = functional_group_value(ds, "PixelMeasuresSequence", "PixelSpacing")
         rows = int(getattr(ds, "Rows"))
         cols = int(getattr(ds, "Columns"))
         return f"{float(spacing[0]) * rows:g}x{float(spacing[1]) * cols:g}"
@@ -1558,9 +1941,14 @@ def file_context(
     manufacturer = ds_value(ds, "Manufacturer")
     sequence_name = sequence_name_text(ds)
     modality = ds_value(ds, "Modality")
-    image_orientation_patient = image_orientation_patient_value(ds)
-    in_plane_phase_encoding_direction = in_plane_phase_encoding_direction_value(ds)
     scan_duration, scan_duration_source = scan_duration_fields(ds)
+    enhanced_attrs, frame_varying = resolve_enhanced_attributes(ds)
+    ped_val, ped_varying = resolve_phase_encoding_direction(ds)
+    if ped_varying:
+        if frame_varying == "none":
+            frame_varying = "PhaseEncodingDirectionPatient"
+        elif frame_varying != "N/A":
+            frame_varying = f"{frame_varying}|PhaseEncodingDirectionPatient"
 
     row = {
         "SeriesUID": series_uid,
@@ -1577,37 +1965,37 @@ def file_context(
         "AcquisitionTime": ds_value(ds, "AcquisitionTime"),
         "PatientName": patient_name,
         "Modality": ds_value(ds, "Modality"),
-        "TR_ms": ds_value(ds, "RepetitionTime"),
-        "TE_ms": ds_value(ds, "EchoTime"),
+        "TR_ms": enhanced_attrs["TR_ms"],
+        "TE_ms": enhanced_attrs["TE_ms"],
         "EchoCount": "N/A",
         "EchoTimes_ms": "N/A",
         "FOV_HxW_mm": fov_text(ds),
         "Matrix_RowsxCols": matrix_text(ds),
-        "PixelBandwidth_Hz_per_px": ds_value(ds, "PixelBandwidth"),
-        "EchoTrainLength": ds_value(ds, "EchoTrainLength"),
-        "FlipAngle_deg": ds_value(ds, "FlipAngle"),
-        "SliceThickness_mm": ds_value(ds, "SliceThickness"),
-        "SpacingBetweenSlices_mm": ds_value(ds, "SpacingBetweenSlices"),
+        "PixelBandwidth_Hz_per_px": enhanced_attrs["PixelBandwidth_Hz_per_px"],
+        "EchoTrainLength": enhanced_attrs["EchoTrainLength"],
+        "FlipAngle_deg": enhanced_attrs["FlipAngle_deg"],
+        "SliceThickness_mm": enhanced_attrs["SliceThickness_mm"],
+        "SpacingBetweenSlices_mm": enhanced_attrs["SpacingBetweenSlices_mm"],
         "SliceLocation_mm": ds_value(ds, "SliceLocation"),
-        "NumberOfAverages": ds_value(ds, "NumberOfAverages"),
+        "NumberOfAverages": enhanced_attrs["NumberOfAverages"],
         "MagneticFieldStrength_T": ds_value(ds, "MagneticFieldStrength"),
         "ScanningSequence": ds_value(ds, "ScanningSequence"),
         "SequenceVariant": ds_value(ds, "SequenceVariant"),
         "SequenceName": sequence_name,
-        "InversionTime_ms": ds_value(ds, "InversionTime"),
+        "InversionTime_ms": enhanced_attrs["InversionTime_ms"],
         "EchoNumbers": ds_value(ds, "EchoNumbers"),
         "AcquisitionMatrix": ds_value(ds, "AcquisitionMatrix"),
         "NumberOfPhaseEncodingSteps": ds_value(ds, "NumberOfPhaseEncodingSteps"),
         "PercentSampling": ds_value(ds, "PercentSampling"),
         "PercentPhaseFOV": ds_value(ds, "PercentPhaseFieldOfView"),
-        "ParallelReductionFactorInPlane": text_value(
-            parallel_reduction_factor_in_plane_value(ds)
-        ),
+        "ParallelReductionFactorInPlane": enhanced_attrs["ParallelReductionFactorInPlane"],
         "SAR": ds_value(ds, "SAR"),
         "ScanDuration": scan_duration,
         "ScanDurationSource": scan_duration_source,
-        "InPlanePhaseEncodingDirection": text_value(in_plane_phase_encoding_direction),
-        "PhaseEncodingDirectionPatient": phase_encoding_direction_patient(ds),
+        "NumberOfFrames": ds_value(ds, "NumberOfFrames"),
+        "FrameVaryingAttributes": frame_varying,
+        "InPlanePhaseEncodingDirection": enhanced_attrs["InPlanePhaseEncodingDirection"],
+        "PhaseEncodingDirectionPatient": ped_val,
         "Manufacturer": manufacturer,
         "ManufacturerModelName": ds_value(ds, "ManufacturerModelName"),
         "ReceiveCoilName": ds_value(ds, "ReceiveCoilName"),
@@ -1617,9 +2005,9 @@ def file_context(
         "MRAcquisitionType": ds_value(ds, "MRAcquisitionType"),
         "Rows": ds_value(ds, "Rows"),
         "Columns": ds_value(ds, "Columns"),
-        "PixelSpacing": pixel_spacing(ds),
-        "ImagePositionPatient": ds_value(ds, "ImagePositionPatient"),
-        "ImageOrientationPatient": text_value(image_orientation_patient),
+        "PixelSpacing": enhanced_attrs["PixelSpacing"],
+        "ImagePositionPatient": text_value(image_position_patient_value(ds)),
+        "ImageOrientationPatient": enhanced_attrs["ImageOrientationPatient"],
         "PatientPosition": ds_value(ds, "PatientPosition"),
         "FrameOfReferenceUID": ds_value(ds, "FrameOfReferenceUID"),
         "StudyInstanceUID": ds_value(ds, "StudyInstanceUID"),
@@ -2729,14 +3117,15 @@ def add_series_aggregates(rows: list[dict[str, str]]) -> list[dict[str, str]]:
 
     aggregates: dict[str, dict[str, str]] = {}
     for series_key, series_rows in grouped.items():
-        echo_times = sorted(
-            {
-                row.get("TE_ms", "N/A")
-                for row in series_rows
-                if row.get("TE_ms", "N/A") != "N/A"
-            },
-            key=natural_key,
-        )
+        echo_times_set: set[str] = set()
+        for row in series_rows:
+            te_val = row.get("TE_ms", "N/A")
+            if te_val != "N/A":
+                for part in te_val.split("|"):
+                    part = part.strip()
+                    if part and part != "N/A":
+                        echo_times_set.add(part)
+        echo_times = sorted(echo_times_set, key=natural_key)
         coil_elements = sorted(
             {
                 row.get("SiemensCoilElement", "N/A")
@@ -2879,11 +3268,13 @@ def write_run_summary(
             "space_check": options.space_check,
             "list_only": options.list_only,
             "layout": options.layout,
+            "config_file": options.config_file,
         },
         "started_at": started_at,
         "ended_at": ended_at,
         "status": status,
         "error": error,
+        "config_file": options.config_file,
         "checksum": options.checksum,
         "input_root": str(options.input_root),
         "output_root": str(output_root),
@@ -3470,8 +3861,103 @@ def run(
     )
 
 
+def effective_config_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    """Build effective configuration dictionary from parsed arguments."""
+    effective: dict[str, Any] = {}
+    if getattr(args, "output", None) is not None:
+        effective["output"] = str(args.output)
+    effective["action"] = str(getattr(args, "action", "copy"))
+    effective["if_exists"] = str(getattr(args, "if_exists", "error"))
+    effective["profile"] = str(getattr(args, "profile", "auto"))
+    effective["patient_mode"] = str(getattr(args, "patient_mode", "keep"))
+    effective["layout"] = str(getattr(args, "layout", "device-date"))
+    effective["list_only"] = bool(getattr(args, "list_only", False))
+    tags = getattr(args, "dicom_tags", None)
+    if tags:
+        effective["dicom_tags"] = list(tags)
+    effective["force_read"] = bool(getattr(args, "force_read", True))
+    effective["include_hidden"] = bool(getattr(args, "include_hidden", False))
+    effective["include_organized"] = bool(getattr(args, "include_organized", False))
+    effective["series_dir_template"] = str(
+        getattr(args, "series_dir_template", DEFAULT_SERIES_DIR_TEMPLATE)
+    )
+    effective["file_template"] = str(
+        getattr(args, "file_template", DEFAULT_FILE_TEMPLATE)
+    )
+    effective["checksum"] = bool(getattr(args, "checksum", False))
+    effective["space_check"] = bool(getattr(args, "space_check", True))
+    effective["progress"] = bool(getattr(args, "progress", True))
+    return effective
+
+
+def run_self_test(report_path: Path | str | None = None) -> int:
+    from dicom_organizer.selftest import run_self_test as _run_self_test
+
+    return _run_self_test(report_path)
+
+
+def diagnostics_lines(config_file: str | None = None) -> list[str]:
+    """Return diagnostic lines for bug reports with sensitive paths sanitized."""
+    try:
+        import PySide6
+
+        pyside6_ver = getattr(PySide6, "__version__", "installed")
+    except ImportError:
+        pyside6_ver = "not installed"
+
+    import locale
+
+    try:
+        loc = f"{locale.getlocale()}"
+    except Exception:
+        loc = "unknown"
+
+    home = str(Path.home())
+
+    def mask_home(val: str | None) -> str:
+        if not val:
+            return "none"
+        if val == home or val.startswith(home + os.sep):
+            return "~" + val[len(home):]
+        return val
+
+    is_frozen = getattr(sys, "frozen", False)
+
+    lines = [
+        f"dicom-organizer: {package_version()}",
+        f"output_schema_version: {OUTPUT_SCHEMA_VERSION}",
+        f"python: {platform.python_version()}",
+        f"platform: {platform.platform()}",
+        f"pydicom: {pydicom.__version__}",
+        f"pyside6: {pyside6_ver}",
+        f"frozen: {'true' if is_frozen else 'false'}",
+        f"executable: {mask_home(sys.executable)}",
+        f"config_file: {mask_home(config_file)}",
+        f"locale: {loc}",
+    ]
+    return lines
+
+
 def main() -> int:
-    args = parse_args()
+    try:
+        args = parse_args()
+    except ValueError as exc:
+        print(f"dicom-organizer: error: {exc}", file=sys.stderr)
+        return 2
+
+    if getattr(args, "print_config", False):
+        effective = effective_config_from_args(args)
+        sys.stdout.write(config_to_toml(effective))
+        return 0
+
+    if getattr(args, "self_test", False):
+        return run_self_test(getattr(args, "self_test_report", None))
+
+    if getattr(args, "diagnostics", False):
+        for line in diagnostics_lines(config_file=getattr(args, "config_file", None)):
+            print(line)
+        return 0
+
     progress_callback = None
     if getattr(args, "progress", True) and sys.stderr.isatty():
         progress_callback = make_cli_progress()

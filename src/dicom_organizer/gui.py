@@ -285,7 +285,7 @@ class TaskCard(QPushButton):
                 pal,
                 fg_role=QPalette.ColorRole.ButtonText,
                 bg_role=card_bg,
-                min_contrast=4.8,
+                min_contrast=6.0,
             )
         else:
             title_color = btn_fg
@@ -293,13 +293,36 @@ class TaskCard(QPushButton):
                 pal,
                 fg_role=QPalette.ColorRole.ButtonText,
                 bg_role=card_bg,
-                min_contrast=4.8,
+                min_contrast=6.0,
             )
 
         if contrast_ratio(title_color, card_bg) < 4.5:
             title_color = btn_fg
-        if contrast_ratio(desc_color, card_bg) < 4.5:
-            desc_color = btn_fg
+        if contrast_ratio(desc_color, card_bg) < 6.0:
+            if contrast_ratio(btn_fg, card_bg) >= 6.0:
+                desc_color = btn_fg
+            elif is_dark:
+                white = QColor(255, 255, 255)
+                if contrast_ratio(white, card_bg) >= 6.0:
+                    ratio = 0.70
+                    cand = blend_colors(white, card_bg, ratio)
+                    while contrast_ratio(cand, card_bg) < 6.0 and ratio < 0.98:
+                        ratio += 0.02
+                        cand = blend_colors(white, card_bg, ratio)
+                    desc_color = cand if contrast_ratio(cand, card_bg) >= 6.0 else white
+                else:
+                    desc_color = btn_fg
+            else:
+                black = QColor(0, 0, 0)
+                if contrast_ratio(black, card_bg) >= 6.0:
+                    ratio = 0.70
+                    cand = blend_colors(black, card_bg, ratio)
+                    while contrast_ratio(cand, card_bg) < 6.0 and ratio < 0.98:
+                        ratio += 0.02
+                        cand = blend_colors(black, card_bg, ratio)
+                    desc_color = cand if contrast_ratio(cand, card_bg) >= 6.0 else black
+                else:
+                    desc_color = btn_fg
 
         self.title_label.setStyleSheet(f"QLabel {{ color: {title_color.name()}; }}")
         self.description_label.setStyleSheet(f"QLabel {{ color: {desc_color.name()}; }}")

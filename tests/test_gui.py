@@ -1013,12 +1013,16 @@ def test_k1_secondary_text_contrast_and_palette_change(tmp_path: Path) -> None:
                         color_hex = ss.split("color:")[1].split(";")[0].strip()
                         label_color = QColor(color_hex)
                         ratio = gui.contrast_ratio(label_color, expected_bg)
-                        assert ratio >= 4.5, (
-                            f"{pal_name} {task} {kind}: contrast {ratio:.2f} < 4.5 "
+                        threshold = 6.0 if kind == "description" else 4.5
+                        assert ratio >= threshold, (
+                            f"{pal_name} {task} {kind}: contrast {ratio:.2f} < {threshold} "
                             f"({color_hex} on {expected_bg.name()})"
                         )
 
-                # Pixel-based check for all start page labels
+                # Pixel-based check for all start page labels.
+                # Threshold is 4.0 because anti-aliased edge pixels may not reach the exact specified color.
+                # Contrast >= 4.5 (and >= 6.0 for card description) is guaranteed by comparing specified colors with background above.
+                # 文字の輪郭のぼかしにより、指定色そのものの画素が現れないことがある。4.5 の保証は指定色と背景色の比較で行う。
                 start = window.stack.widget(0)
                 labels = [
                     lab for lab in start.findChildren(QLabel) if lab.text().strip() and not lab.isHidden()
@@ -1039,7 +1043,7 @@ def test_k1_secondary_text_contrast_and_palette_change(tmp_path: Path) -> None:
                     for rgb in colors:
                         lp = gui.relative_luminance(QColor(rgb))
                         best = max(best, (max(lp, lb) + 0.05) / (min(lp, lb) + 0.05))
-                    assert best >= 4.5, f"[{pal_name}] Label '{lab.text()[:15]}' contrast {best:.2f} < 4.5"
+                    assert best >= 4.0, f"[{pal_name}] Label '{lab.text()[:15]}' contrast {best:.2f} < 4.0"
 
                 if pal_name == "dark":
                     # Verify dynamic palette change updates

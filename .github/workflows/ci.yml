@@ -135,3 +135,43 @@ jobs:
           uv pip install --python "$PYTHON_BIN" "${WHEEL_PATH}[gui]"
           dicom-organizer-gui --self-test
           dicom-organizer-gui --gui-smoke-test
+
+  test-python-versions:
+    name: ubuntu-latest / Python ${{ matrix.python-version }} / CLI + GUI tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Qt runtime libraries (Ubuntu)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libfontconfig1 libglib2.0-0 libdbus-1-3
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies and run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+          DICOM_ORGANIZER_REQUIRE_GUI: "1"
+        run: |
+          uv venv --python ${{ matrix.python-version }} .venv
+          uv pip install '.[gui]' pytest
+          .venv/bin/python -m pytest -q
+          .venv/bin/dicom-organizer --version
+          .venv/bin/dicom-organizer --self-test
+          .venv/bin/dicom-organizer-gui --self-test
+

@@ -64,6 +64,7 @@ occur, but they should be documented here.
 - Add common short CLI options for output, profile, dry-run, force-read, limit, custom DICOM tags, and verbose output.
 
 ### Changed
+- Expand supported Python versions from ">=3.11,<3.12" to ">=3.11" by removing the upper-bound restriction (supporting Python 3.11 or later; tested locally on Python 3.11, 3.12, 3.13, and 3.14; the CI matrix now covers the same versions).
 - Enhance GUI results display with 1-sentence plain-language conclusions (accurately reflecting CSV target images and image series in list-only/preview modes), categorized skip/unhandled reason table, series preview table, quick-open folder/CSV buttons, and direct transition from preview to execution.
 - Refine GUI styling for dark mode support (guaranteeing >= 4.5 contrast ratios on color-coded panels, action bars, and secondary labels/card texts via dynamically computed palette blend colors), eliminate placeholder-text reliance for dim text, eliminate pixel-fixed font sizes to fully support dynamic font scaling, ensure full word-wrapping in counts tables, and enforce expanding form fields on macOS.
 - Rewrite `tests/test_gui.py` covering 13 test scenarios in offscreen mode with strict `DICOM_ORGANIZER_REQUIRE_GUI=1` enforcement.

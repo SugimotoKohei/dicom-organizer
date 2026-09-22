@@ -11,7 +11,7 @@
 
 ### 1. Basic Invocation
 
-You can run the tool using the installed console script or directly via Python module entry points:
+The Python edition requires Python 3.11 or later (automated test suite verifies 3.11, 3.12, 3.13, and 3.14; using the GUI extra follows PySide6 version support, which is Python >=3.10,<3.15 as of PySide6 6.11.1 in 2026-09). You can run the tool using the installed console script or directly via Python module entry points:
 
 ```bash
 # Preferred positional command
@@ -144,7 +144,7 @@ open ~/Applications/dicom-organizer.app
 
 ### 1. 基本的な実行方法
 
-インストール済みのコマンド、または Python モジュール経由で実行できます:
+Python パッケージ版は Python 3.11 以上（自動テストで確認しているのは 3.11・3.12・3.13・3.14。GUI を使う場合は PySide6 の対応範囲に従い、2026-09 時点の PySide6 6.11.1 は 3.10 以上 3.15 未満）を対象としています。インストール済みのコマンド、または Python モジュール経由で実行できます:
 
 ```bash
 # 基本の実行（位置引数で入力フォルダを指定）

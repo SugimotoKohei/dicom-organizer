@@ -19,12 +19,12 @@ This guide provides institutional IT administrators, security officers, and rese
 
 | Consideration | Technical Specification / Policy |
 |---|---|
-| **Supported Platforms** | Automated tests are executed in CI (GitHub Actions) on `ubuntu-latest`, `macos-latest`, and `windows-latest`. Standalone desktop apps are built for Windows (x64) and macOS (arm64 & x86_64). Operation on other OS versions is unverified. |
+| **Supported Platforms** | Automated tests are executed in CI (GitHub Actions) on `ubuntu-latest`, `macos-latest`, and `windows-latest` for Python 3.11, plus test matrix on Ubuntu for Python 3.12, 3.13, and 3.14. Standalone desktop apps are built for Windows (x64) and macOS (arm64 & x86_64). Operation on other OS versions is unverified. |
 | **User Privileges Required** | **Standard user only**. No administrator (root / sudo) privileges are required. |
 | **Network Communications** | **No background network activity**. The application contains no network transmission code, no telemetry, and performs no automatic updates. Only when a user clicks "Documentation" in the GUI Help menu (Help -> Documentation), the default web browser opens the GitHub documentation page. |
 | **Input Data Safety** | **Read-only by default**: In default copy mode, list-only mode, and dry-run mode, source files are strictly opened in read-only mode and never modified. Source files are moved only when `--action move` is explicitly requested alongside `--confirm-move`. |
 | **Write Destinations** | Writes are strictly constrained to: (1) The user-specified output folder, (2) The file specified via `--self-test-report`, (3) GUI settings saved in the OS per-user settings store (on macOS: `~/Library/Preferences/com.dicom-organizer.dicom-organizer.plist`), (4) An OS temporary directory used transiently by `--self-test` and "Try with Sample Data", and (5) `~/Applications/dicom-organizer.app` created by `dicom-organizer-gui-app`. |
-| **Dependencies** | Standalone executables are fully self-contained (bundled Python and Qt runtimes). Python packages require Python 3.11 with `pydicom` and optional `pyside6`. |
+| **Dependencies** | Standalone executables are fully self-contained (bundled Python and Qt runtimes). Python packages require Python 3.11 or later (automated test suite verifies 3.11, 3.12, 3.13, and 3.14; using the GUI extra follows PySide6 version support, which is Python >=3.10,<3.15 as of PySide6 6.11.1 in 2026-09) with `pydicom` and optional `pyside6`. |
 | **Disk Space Safety** | Pre-checks destination available disk space before initiating copy operations (fails safely if insufficient). |
 
 ### 3. Verification and Acceptance Testing
@@ -85,12 +85,12 @@ checksum = true
 
 | 項目 | 仕様および方針 |
 |---|---|
-| **対応 OS** | CI（GitHub Actions）で自動テストを実行しているのは `ubuntu-latest`、`macos-latest`、`windows-latest` です。単体アプリをビルドするのは Windows（x64）と macOS（arm64・x86_64）です。これら以外の OS バージョンでの動作は未確認です。 |
+| **対応 OS** | CI（GitHub Actions）で自動テストを実行しているのは `ubuntu-latest`、`macos-latest`、`windows-latest`（Python 3.11）、および Linux 上での Python 3.12・3.13・3.14 です。単体アプリをビルドするのは Windows（x64）と macOS（arm64・x86_64）です。これら以外の OS バージョンでの動作は未確認です。 |
 | **必要権限** | **一般ユーザー権限のみ**。管理者権限（UAC 昇格、root、sudo）は一切不要です。 |
 | **ネットワーク通信** | **バックグラウンド通信ゼロ**。本体に通信コードはなく、利用状況やテレメトリ送信、自動更新チェック等も行いません。ただし、GUI の「ヘルプ」メニューから「ドキュメント」をクリックしたときだけ、既定のブラウザで GitHub の文書ページが開きます（クリックしなければ通信しません）。 |
 | **データの流れ（入力）** | **原則読み取り専用**: 既定の copy、一覧のみ（`--list-only`）、確認（`--dry-run`）では入力ファイルを読むだけで変更しません。明示的に `--action move`（要 `--confirm-move`）を選んだときだけ入力ファイルを移動します。 |
 | **書き込み先** | 実際に書き込む先は以下の場所に限定されます:<br>1. ユーザーが指定した出力フォルダ（`organized/` や `organized_list/`）<br>2. `--self-test-report` で指定したファイル<br>3. GUI の設定（OS ごとの設定保存領域。macOS では `~/Library/Preferences/com.dicom-organizer.dicom-organizer.plist`）<br>4. `--self-test` や GUI の「サンプルデータで試す」が使用する OS の一時フォルダ<br>5. `dicom-organizer-gui-app` が作成する `~/Applications/dicom-organizer.app` |
-| **外部依存性** | 単体アプリ版は Python および Qt ランタイムを同梱（追加インストール不要）。Python 版は Python 3.11、pydicom、PySide6 を使用。 |
+| **外部依存性** | 単体アプリ版は Python および Qt ランタイムを同梱（追加インストール不要）。Python 版は Python 3.11 以上（自動テストで確認しているのは 3.11・3.12・3.13・3.14。GUI を使う場合は PySide6 の対応範囲に従い、2026-09 時点の PySide6 6.11.1 は 3.10 以上 3.15 未満）、pydicom、PySide6 を使用。 |
 | **空き容量の保護** | コピー開始前に出力先ドライブの空き容量を事前検証し、容量不足時は安全に処理を停止します。 |
 
 ### 3. 受け入れ確認（動作確認）

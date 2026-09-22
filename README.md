@@ -147,7 +147,7 @@ Download the application bundle for Windows or macOS from [GitHub Releases](http
 > Unsigned binaries trigger first-launch warnings; see [`docs/install.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/install.md) for dismissal instructions.
 
 #### Python Package Edition
-Requires Python 3.11:
+Requires Python 3.11 or later (automated test suite verifies 3.11, 3.12, 3.13, and 3.14; using the GUI extra follows PySide6 version support, which is Python >=3.10,<3.15 as of PySide6 6.11.1 in 2026-09):
 ```bash
 # Command-line tool only
 uv tool install dicom-organizer
@@ -342,7 +342,7 @@ organized/
 > 未署名アプリのため初回起動時にセキュリティ警告が表示されます。解除方法は [`docs/install.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/install.md) を参照してください。
 
 #### Python パッケージ版
-Python 3.11 環境で `uv` を用いてインストールします:
+Python 3.11 以上（自動テストで確認しているのは 3.11・3.12・3.13・3.14。GUI を使う場合は PySide6 の対応範囲に従い、2026-09 時点の PySide6 6.11.1 は 3.10 以上 3.15 未満）の環境で `uv` を用いてインストールします:
 ```bash
 # コマンドラインツールのみ
 uv tool install dicom-organizer

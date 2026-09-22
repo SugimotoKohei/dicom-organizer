@@ -16,6 +16,7 @@ Every code change is tested through automated test suites in continuous integrat
 - **GUI Test Suite** (e.g., `test_start_page_buttons_and_language_switch`): Tested in headless offscreen mode with `DICOM_ORGANIZER_REQUIRE_GUI=1` and `QT_QPA_PLATFORM=offscreen`.
 - **DICOM Specification Suite** (e.g., `test_compressed_transfer_syntax_jpeg_baseline_and_lossless`): Compression integrity, Japanese character sets, and functional groups.
 - **Packaging and Install Tests**: Building wheel distributions and installing them into a clean Python 3.11 virtual environment to verify `--version`, `--self-test` (and `--gui-smoke-test` for the GUI extra) across Linux, macOS, and Windows.
+- **Python Version Matrix**: In addition to testing across 3 operating systems on Python 3.11, automated test suites run on Ubuntu Linux against Python 3.12, 3.13, and 3.14 installing via `uv pip install '.[gui]' pytest`. In CI, the jobs for Python 3.12, 3.13, and 3.14 have not yet been run until this revision is pushed and executed on remote runners.
 
 > [!NOTE]
 > **Standalone Executable CI Builds**: Automated workflows for standalone desktop executables (`.github/workflows/standalone.yml`) have been prepared, but executable artifact builds have **not yet been verified** on GitHub Actions until this branch is pushed and executed on remote runners.
@@ -62,6 +63,7 @@ We encourage users to report compatibility with their own clinical or research s
 - **GUI テスト**（例: `test_start_page_buttons_and_language_switch`）: `DICOM_ORGANIZER_REQUIRE_GUI=1` および `QT_QPA_PLATFORM=offscreen` 環境下で、オフスクリーンによる PySide6 GUI の網羅的動作確認。
 - **DICOM 規格適合テスト**（例: `test_compressed_transfer_syntax_jpeg_baseline_and_lossless`）: 圧縮転送構文のバイト完全性、日本語文字コード、非画像オブジェクト、Enhanced MR の検証。
 - **パッケージング・配布テスト**: ビルドした wheel を Python 3.11 のクリーンな仮想環境にインストールし、`--version`、`--self-test`（GUI 版は `--gui-smoke-test`）を実行して 3 OS 上での動作を確認。
+- **Python バージョンマトリクス**: 3 OS 上の Python 3.11 環境に加えて、Linux 上で利用者の導入手順と同様に `uv pip install '.[gui]' pytest` を用いて Python 3.12・3.13・3.14 のテストジョブを実行します。なお、この改定を push して CI が実行されるまで、3.12〜3.14 のジョブは CI 上では未実行です。
 
 > [!NOTE]
 > **単体アプリの CI ビルドについて**: 単体配布用バイナリの自動ビルドワークフロー（`.github/workflows/standalone.yml`）は定義済みですが、本リポジトリがリモートに push されて GitHub Actions 上で実行されるまで、**単体アプリの CI ビルドは未検証**です。

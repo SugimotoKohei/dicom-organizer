@@ -4,6 +4,7 @@
 - 目的に沿って最小の変更で進める。
 - 破壊的変更・不可逆操作は事前に確認する。
 - Python 実行環境は uv を使い、Python 3.11 系を前提にする。
+- 上記はリポジトリ開発・CI・単体アプリビルドの環境前提であり、パッケージ利用者の対応範囲は Python 3.11 以上とする。
 - DICOMサンプルや出力結果などの実データは Git 管理しない。
 - CLI と GUI は `src/dicom_organizer/core.py` の同じ中核処理を使い、挙動差を作らない。
 - GUI テストは `DICOM_ORGANIZER_REQUIRE_GUI=1 QT_QPA_PLATFORM=offscreen` で実行し skip させないこと。

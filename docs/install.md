@@ -15,7 +15,7 @@ This guide provides instructions for installing, running, updating, and uninstal
   - **No Python required**. Completely self-contained.
   - Recommended for users who want a graphical desktop tool to organize DICOM folders and inspect series conditions without touching terminal commands.
 - **Python Package (CLI and Python GUI)**:
-  - Requires Python 3.11 and [uv](https://docs.astral.sh/uv/) (or pip).
+  - Requires Python 3.11 or later and [uv](https://docs.astral.sh/uv/) (or pip). Automated test suite verifies 3.11, 3.12, 3.13, and 3.14. Using the GUI extra follows PySide6 version support (as of 2026-09, PySide6 6.11.1 supports >=3.10,<3.15).
   - Recommended for pipeline integration, automated scripts, headless server environments, or users comfortable with terminal commands.
 
 ### 2. Standalone Desktop App Installation
@@ -90,7 +90,7 @@ To install on an air-gapped machine:
 
 ### 3. Python Package Installation (CLI and Python GUI)
 
-The Python edition requires Python 3.11. Using `uv` is strongly recommended.
+The Python edition requires Python 3.11 or later (automated test suite verifies 3.11, 3.12, 3.13, and 3.14; using the GUI extra follows PySide6 version support, which is Python >=3.10,<3.15 as of PySide6 6.11.1 in 2026-09). Using `uv` is strongly recommended.
 
 #### Installing with uv
 - CLI only:
@@ -122,7 +122,7 @@ The `dicom-organizer-gui-app` command creates a lightweight macOS application la
 #### Offline Installation for Python Edition
 Because platform-specific wheels (especially PySide6) differ across operating systems and CPU architectures, wheels must be collected on an online computer with the **same OS and CPU architecture** as the target machine:
 ```bash
-python3.11 -m pip download --dest ./wheelhouse "dicom-organizer[gui]"
+python3 -m pip download --dest ./wheelhouse "dicom-organizer[gui]"
 ```
 Transfer the `./wheelhouse` directory to the offline machine, then install using `--no-index`:
 ```bash
@@ -142,7 +142,7 @@ uv tool install --no-index --find-links ./wheelhouse 'dicom-organizer[gui]'
   - **Pythonの事前インストールは一切不要**です。必要なランタイムがすべて同梱されています。
   - コマンドラインを使わず、手元のDICOMフォルダを整理し撮像条件を一覧化したい一般の利用者におすすめです。
 - **Pythonパッケージ版（CLIおよびPython GUI）**:
-  - Python 3.11 と `uv`（または pip）が必要です。
+  - Python 3.11 以上と `uv`（または pip）が必要です。自動テストで確認しているのは 3.11・3.12・3.13・3.14 です。GUI を使う場合は PySide6 の対応範囲に従います（2026-09 時点の PySide6 6.11.1 は 3.10 以上 3.15 未満）。
   - バッチ処理や他ツールとの連携スクリプト、サーバ環境での自動化を行う方向けです。
 
 ### 2. 単体アプリ版のインストールと起動
@@ -218,7 +218,7 @@ uv tool install --no-index --find-links ./wheelhouse 'dicom-organizer[gui]'
 
 ### 3. Python パッケージ版のセットアップ（CLI / Python GUI）
 
-Python 3.11 環境でコマンドラインツールやスクリプトとして利用する場合の手順です。
+Python 3.11 以上の環境（自動テストで確認しているのは 3.11・3.12・3.13・3.14。GUI を使う場合は PySide6 の対応範囲に従い、2026-09 時点の PySide6 6.11.1 は 3.10 以上 3.15 未満）でコマンドラインツールやスクリプトとして利用する場合の手順です。
 
 #### uv によるインストール
 - CLI のみ:
@@ -250,7 +250,7 @@ Python 3.11 環境でコマンドラインツールやスクリプトとして�
 #### Python 版のオフライン導入
 プラットフォーム固有のバイナリパッケージ（特に PySide6）は OS や CPU アーキテクチャごとに異なるため、対象のオフライン PC と**同じ OS・CPU アーキテクチャ**のオンライン PC で wheel を集める必要があります:
 ```bash
-python3.11 -m pip download --dest ./wheelhouse "dicom-organizer[gui]"
+python3 -m pip download --dest ./wheelhouse "dicom-organizer[gui]"
 ```
 `./wheelhouse` ディレクトリをオフライン環境へ持ち込み、`--no-index` オプションでインストールします:
 ```bash

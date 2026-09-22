@@ -31,8 +31,8 @@ To progress transparently across maturity tiers, the project must meet empirical
 
 | Progression Stage | Required Objective Criteria | Current Status | Met? |
 |---|---|---|---|
-| **Alpha** (Current) | - Automated test coverage across core organization, GUI, and support matrix.<br>- Multi-vendor empirical verification on real MRI data (5 models).<br>- Zero data-loss defects during test runs. | Met in the unreleased 0.2.0 development branch. | **MET (0.2.0 development)** |
-| **Beta** | - Verified reports from at least 3 external institutions / hospitals.<br>- Minimum 3 consecutive months with zero data-loss or file-corruption issues reported.<br>- Code signing certificates acquired for macOS and Windows standalone binaries.<br>- Stable `output_schema_version` maintained across 2 consecutive releases. | External verification reports: 0 received; Code signing: unacquired; Consecutive schema-stable releases: 0. | In Progress |
+| **Alpha** (Current) | - Automated test coverage across core organization, GUI, and support matrix.<br>- Multi-vendor empirical verification on real MRI data (5 models).<br>- Zero data-loss defects during test runs. | Met in the 0.2.0 release (previously verified in the unreleased 0.2.0 development branch). | **MET (0.2.0)** |
+| **Beta** | - Verified reports from at least 3 external institutions / hospitals.<br>- Minimum 3 consecutive months with zero data-loss or file-corruption issues reported.<br>- Code signing certificates acquired for macOS and Windows standalone binaries.<br>- Stable `output_schema_version` maintained across 2 consecutive releases. | External verification reports: 0 received; Standalone binary CI builds: succeeded, but code signing certificates unacquired; Consecutive schema-stable releases: 0. | In Progress |
 | **Stable (1.0)** | - Verified scanner reports covering all 4 major vendors (GE, Siemens, Philips, Canon) across both MR and CT modalities.<br>- Documented continuous adoption in at least 5 clinical or academic research institutions.<br>- Schema unchanged for at least 6 months.<br>- Comprehensive user documentation and tutorial guides. | Scanner validation: MR verified across 4 vendors, CT unverified; Continuous adoption: 0 institutions; Schema stability: 0 months. | Planned |
 
 ---
@@ -64,6 +64,6 @@ To progress transparently across maturity tiers, the project must meet empirical
 
 | 開発段階 | 移行に必要な客観的基準 | 現在の達成状況 | 判定 |
 |---|---|---|---|
-| **Alpha**（現在） | - 中核機能、GUI、対応規格に関する自動テストの網羅。<br>- 4 社 5 機種の MRI 実機データによる集計検証の完了。<br>- データ消失・破壊のないことの確認。 | 0.2.0（未リリース）の開発版で満たしている。 | **達成済（0.2.0 開発版）** |
-| **Beta** | - 外部の 3 施設以上からの実機検証報告の受領。<br>- データ破損・消失に関する致命的不具合ゼロの期間が 3 か月以上継続。<br>- macOS および Windows 単体バイナリへの正式なコード署名の取得。<br>- 2 リリース連続で `output_schema_version` が無変更であること。 | 外部施設からの検証報告 0 件、コード署名 未取得、スキーマ据え置きのリリース 0 回。 | 進行中 |
+| **Alpha**（現在） | - 中核機能、GUI、対応規格に関する自動テストの網羅。<br>- 4 社 5 機種の MRI 実機データによる集計検証の完了。<br>- データ消失・破壊のないことの確認。 | 0.2.0 リリースで達成（未リリースの 0.2.0 開発版での検証を経て達成）。 | **達成済（0.2.0）** |
+| **Beta** | - 外部の 3 施設以上からの実機検証報告の受領。<br>- データ破損・消失に関する致命的不具合ゼロの期間が 3 か月以上継続。<br>- macOS および Windows 単体バイナリへの正式なコード署名の取得。<br>- 2 リリース連続で `output_schema_version` が無変更であること。 | 外部施設からの検証報告 0 件、単体バイナリの CI ビルドは成功済みだがコード署名は未取得、スキーマ据え置きのリリース 0 回。 | 進行中 |
 | **Stable (1.0)** | - 主要 4 社（GE、Siemens、Philips、Canon）の MR および CT 両方での実機検証完了。<br>- 5 つ以上の医療・研究施設での継続的な利用実績。<br>- 6 か月以上のスキーマ安定期間。<br>- 網羅的なドキュメントと利用チュートリアルの整備。 | MR 4 社のみ実機検証完了（CT 未検証）、継続利用施設 0 施設、スキーマ安定期間 0 か月。 | 計画中 |

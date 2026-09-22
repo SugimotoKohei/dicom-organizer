@@ -16,10 +16,11 @@ Every code change is tested through automated test suites in continuous integrat
 - **GUI Test Suite** (e.g., `test_start_page_buttons_and_language_switch`): Tested in headless offscreen mode with `DICOM_ORGANIZER_REQUIRE_GUI=1` and `QT_QPA_PLATFORM=offscreen`.
 - **DICOM Specification Suite** (e.g., `test_compressed_transfer_syntax_jpeg_baseline_and_lossless`): Compression integrity, Japanese character sets, and functional groups.
 - **Packaging and Install Tests**: Building wheel distributions and installing them into a clean Python 3.14 virtual environment to verify `--version`, `--self-test` (and `--gui-smoke-test` for the GUI extra) across Linux, macOS, and Windows.
-- **Python Version Matrix**: In addition to testing across 3 operating systems on Python 3.14, automated test suites run on Ubuntu Linux against Python 3.11, 3.12, and 3.13 installing via `uv pip install '.[gui]' pytest`. In CI, the jobs for Python 3.11, 3.12, and 3.13 have not yet been run until this revision is pushed and executed on remote runners.
+- **Python Version Matrix**: In addition to testing across 3 operating systems on Python 3.14, automated test suites run on Ubuntu Linux against Python 3.11, 3.12, and 3.13 installing via `uv pip install '.[gui]' pytest`. In CI, these per-version jobs on GitHub Actions have been executed and verified to pass.
+- **Headless CLI Testing (without GUI dependencies)**: An automated CI job on Ubuntu Linux verifies installation and test execution without GUI extras (`PySide6`), confirming proper headless operation.
 
 > [!NOTE]
-> **Standalone Executable CI Builds**: Automated workflows for standalone desktop executables (`.github/workflows/standalone.yml`) have been prepared, but executable artifact builds have **not yet been verified** on GitHub Actions until this branch is pushed and executed on remote runners.
+> **Standalone Executable CI Builds**: Standalone desktop executable packages for three platforms—Windows (x64), macOS (arm64), and macOS (x86_64, Intel)—have been built on GitHub Actions (`.github/workflows/standalone.yml`) and verified to pass initial smoke tests (`--version`, `--self-test`, and `--gui-smoke-test`).
 
 ### 2. Empirical Real-Scanner Verification
 
@@ -63,10 +64,11 @@ We encourage users to report compatibility with their own clinical or research s
 - **GUI テスト**（例: `test_start_page_buttons_and_language_switch`）: `DICOM_ORGANIZER_REQUIRE_GUI=1` および `QT_QPA_PLATFORM=offscreen` 環境下で、オフスクリーンによる PySide6 GUI の網羅的動作確認。
 - **DICOM 規格適合テスト**（例: `test_compressed_transfer_syntax_jpeg_baseline_and_lossless`）: 圧縮転送構文のバイト完全性、日本語文字コード、非画像オブジェクト、Enhanced MR の検証。
 - **パッケージング・配布テスト**: ビルドした wheel を Python 3.14 のクリーンな仮想環境にインストールし、`--version`、`--self-test`（GUI 版は `--gui-smoke-test`）を実行して 3 OS 上での動作を確認。
-- **Python バージョンマトリクス**: 3 OS（ubuntu-latest, macos-latest, windows-latest）上の Python 3.14 環境に加えて、Linux 上で利用者の導入手順と同様に `uv pip install '.[gui]' pytest` を用いて Python 3.11・3.12・3.13 のテストジョブを実行します。なお、この改定を push して CI が実行されるまで、3.11〜3.13 のジョブは CI 上では未実行です。
+- **Python バージョンマトリクス**: 3 OS（ubuntu-latest, macos-latest, windows-latest）上の Python 3.14 環境に加えて、Linux 上で利用者の導入手順と同様に `uv pip install '.[gui]' pytest` を用いて Python 3.11・3.12・3.13 のテストジョブを実行し、CI 上ですべて成功することを確認済みです。
+- **GUI 追加依存なしの試験**: Ubuntu Linux 上で GUI 依存（`PySide6`）を含めずにインストールとテストを実行するジョブを追加し、正常に成功することを確認しています。
 
 > [!NOTE]
-> **単体アプリの CI ビルドについて**: 単体配布用バイナリの自動ビルドワークフロー（`.github/workflows/standalone.yml`）は定義済みですが、本リポジトリがリモートに push されて GitHub Actions 上で実行されるまで、**単体アプリの CI ビルドは未検証**です。
+> **単体アプリの CI ビルドについて**: GitHub Actions 上で単体配布用バイナリ（`.github/workflows/standalone.yml`）を Windows（x64）、macOS（arm64）、macOS（x86_64、Intel）の 3 種類ビルドし、初回の CI ビルドにおいてスモークテスト（`--version`、`--self-test`、`--gui-smoke-test`）に成功したことを確認済みです。
 
 ### 2. 実機データによる検証実績
 

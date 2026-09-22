@@ -6,7 +6,7 @@ This project follows semantic versioning before public API stability is
 guaranteed (see [docs/stability.md](docs/stability.md)). While the project is in `0.x`, CLI and CSV output changes may still
 occur, but they should be documented here.
 
-## 0.2.0 - Unreleased
+## 0.2.0 - 2026-09-23
 
 ### Highlights
 - List imaging parameters without copying files: `--list-only` mode outputs tabular acquisition parameters directly to CSV, ideal for quick protocol inspection and data inventory.

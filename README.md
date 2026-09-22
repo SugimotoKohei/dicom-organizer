@@ -143,7 +143,7 @@ More screenshots are available in [`docs/images/`](https://github.com/SugimotoKo
 #### Standalone Desktop App (Recommended for most users)
 Download the application bundle for Windows or macOS from [GitHub Releases](https://github.com/SugimotoKohei/dicom-organizer/releases).
 > [!NOTE]
-> Standalone executable packages will be provided starting with the **0.2.0** release. Prior to 0.2.0, please use the Python package. The published PyPI package may differ slightly from the unreleased main branch documentation.
+> Standalone executable packages are provided starting with the **0.2.0** release. The published PyPI package may differ slightly from the unreleased main branch documentation.
 > Unsigned binaries trigger first-launch warnings; see [`docs/install.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/install.md) for dismissal instructions.
 
 #### Python Package Edition
@@ -338,7 +338,7 @@ organized/
 #### 単体デスクトップアプリ版（Python 不要・おすすめ）
 [GitHub Releases](https://github.com/SugimotoKohei/dicom-organizer/releases) から Windows 版または macOS 版の zip をダウンロードして展開します。
 > [!NOTE]
-> 単体アプリ版は本改定を含むリリース **0.2.0** から提供されます。それまでは Python パッケージ版をご利用ください。PyPI で公開中のバージョンと、本 README（main ブランチ）の内容が異なる場合があります。
+> 単体アプリ版はリリース **0.2.0** から提供されています。PyPI で公開中のバージョンと、本 README（main ブランチ）の内容が異なる場合があります。
 > 未署名アプリのため初回起動時にセキュリティ警告が表示されます。解除方法は [`docs/install.md`](https://github.com/SugimotoKohei/dicom-organizer/blob/main/docs/install.md) を参照してください。
 
 #### Python パッケージ版
